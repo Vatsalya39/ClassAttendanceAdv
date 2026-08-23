@@ -102,7 +102,9 @@ jobs:
         run: poetry run pytest
 
   build-push:
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # Skipped until Azure OIDC + ACR variable are configured
+    # (docs/github-actions-setup.md) — keeps first pushes green.
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.ACR_LOGIN_SERVER != ''
     needs: quality
     runs-on: ubuntu-latest
     outputs:
@@ -140,7 +142,7 @@ jobs:
           docker push "${{ vars.ACR_LOGIN_SERVER }}/attendance-worker-ml:latest"
 
   deploy-staging:
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.ACR_LOGIN_SERVER != ''
     needs: build-push
     runs-on: ubuntu-latest
     environment: staging

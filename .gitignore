@@ -52,6 +52,10 @@ dist/
 *.log
 docker-compose.override.yml
 
+# ── Bicep build artefacts (az bicep build output; source of truth is *.bicep)
+infra/*.json
+infra/modules/*.json
+
 # ─── Editor / OS ──────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db

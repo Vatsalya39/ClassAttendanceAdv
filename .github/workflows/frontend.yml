@@ -51,7 +51,7 @@ jobs:
           NEXT_PUBLIC_API_URL: https://placeholder-api.example.com
 
   deploy-staging:
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.STAGING_API_URL != ''
     needs: quality
     runs-on: ubuntu-latest
     environment: staging
