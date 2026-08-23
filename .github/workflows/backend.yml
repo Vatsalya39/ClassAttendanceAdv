@@ -1,0 +1,198 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Backend CI/CD — lint, type-check, test (real pgvector Postgres + Redis),
+# build/push images to ACR, run migrations, deploy the staging tier.
+#
+# Images built:
+#   attendance-api          ← Dockerfile target api-ml  (API + ML stack)
+#   attendance-worker-ml    ← Dockerfile target ml-cpu  (CPU inference worker)
+#
+# Deploy order is migrate-then-rollout (expand/contract): the migration job
+# runs inside the VNet via `az containerapp job start`. Partitioned-table
+# migrations are safe here: CREATE TABLE IF NOT EXISTS ... PARTITION OF takes
+# only a brief lock on the new partition — existing partitions and concurrent
+# attendance writes are never blocked; PGOPTIONS lock_timeout in the job
+# guards against any accidental long lock.
+#
+# Required repo secrets: AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
+# Required repo variables: AZURE_RESOURCE_GROUP_STAGING, ACR_LOGIN_SERVER
+# Setup: docs/github-actions-setup.md
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: backend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "ml/**"
+      - "tests/**"
+      - "scripts/**"
+      - "pyproject.toml"
+      - "poetry.lock"
+      - "backend/Dockerfile"
+      - ".github/workflows/backend.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - "ml/**"
+      - "tests/**"
+      - "scripts/**"
+      - "pyproject.toml"
+      - "poetry.lock"
+      - "backend/Dockerfile"
+      - ".github/workflows/backend.yml"
+
+permissions:
+  id-token: write # OIDC federation with Azure — no stored cloud secrets
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: attendance_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7.2-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/attendance_test
+      TEST_REDIS_URL: redis://localhost:6379/0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: pipx install poetry==1.8.3
+
+      - name: Install dependencies
+        run: poetry install --with dev
+
+      - name: Ruff (lint)
+        run: poetry run ruff check backend tests ml scripts
+
+      - name: Black (format check)
+        run: poetry run black --check backend tests ml scripts
+
+      - name: mypy (type check)
+        run: poetry run mypy backend scripts
+
+      - name: Pytest (DB-backed suite)
+        run: poetry run pytest
+
+  build-push:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: quality
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        run: echo "image_tag=sha-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: ACR login
+        run: |
+          az acr login --name "${{ vars.ACR_LOGIN_SERVER }}"
+
+      - name: Build & push api image (api-ml target)
+        run: |
+          docker build --target api-ml \
+            -t "${{ vars.ACR_LOGIN_SERVER }}/attendance-api:${{ steps.meta.outputs.image_tag }}" \
+            -t "${{ vars.ACR_LOGIN_SERVER }}/attendance-api:latest" .
+          docker push "${{ vars.ACR_LOGIN_SERVER }}/attendance-api:${{ steps.meta.outputs.image_tag }}"
+          docker push "${{ vars.ACR_LOGIN_SERVER }}/attendance-api:latest"
+
+      - name: Build & push CPU worker image (ml-cpu target)
+        run: |
+          docker build --target ml-cpu \
+            -t "${{ vars.ACR_LOGIN_SERVER }}/attendance-worker-ml:${{ steps.meta.outputs.image_tag }}" \
+            -t "${{ vars.ACR_LOGIN_SERVER }}/attendance-worker-ml:latest" .
+          docker push "${{ vars.ACR_LOGIN_SERVER }}/attendance-worker-ml:${{ steps.meta.outputs.image_tag }}"
+          docker push "${{ vars.ACR_LOGIN_SERVER }}/attendance-worker-ml:latest"
+
+  deploy-staging:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: build-push
+    runs-on: ubuntu-latest
+    environment: staging
+    env:
+      RG: ${{ vars.AZURE_RESOURCE_GROUP_STAGING }}
+      ACR: ${{ vars.ACR_LOGIN_SERVER }}
+      TAG: ${{ needs.build-push.outputs.image_tag }}
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # ── Migrate FIRST (expand/contract discipline) ──────────────────────────
+      # The job runs alembic upgrade head inside the VNet. Partition creation
+      # in our migrations is non-blocking by design (see header comment).
+      - name: Point migration job at this build & run it
+        run: |
+          az containerapp job update -g "$RG" -n job-db-migrations \
+            --image "$ACR/attendance-api:$TAG"
+          az containerapp job start -g "$RG" -n job-db-migrations
+
+          for i in $(seq 1 60); do
+            STATUS=$(az containerapp job execution list -g "$RG" -n job-db-migrations \
+              --query "[0].properties.status" -o tsv)
+            echo "migration status: $STATUS"
+            [ "$STATUS" = "Succeeded" ] && break
+            [ "$STATUS" = "Failed" ] && { echo "migration failed"; exit 1; }
+            sleep 5
+          done
+          [ "$STATUS" = "Succeeded" ] || { echo "migration timed out"; exit 1; }
+
+      - name: Roll out api tier
+        run: |
+          az containerapp update -g "$RG" --name attendance-api \
+            --image "$ACR/attendance-api:$TAG"
+
+      - name: Roll out worker tiers (CPU + GPU/ml)
+        run: |
+          az containerapp update -g "$RG" --name attendance-worker \
+            --image "$ACR/attendance-worker-ml:$TAG"
+          az containerapp update -g "$RG" --name attendance-ml-inference \
+            --image "$ACR/attendance-worker-gpu:$TAG" || \
+            echo "ml-inference not deployed (GPU profile disabled) — skipping"
+
+      - name: Smoke test /health
+        run: |
+          FQDN=$(az containerapp show -g "$RG" --name attendance-api \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          for i in $(seq 1 20); do
+            curl -sf "https://$FQDN/health" && exit 0
+            sleep 5
+          done
+          echo "smoke test failed"; exit 1

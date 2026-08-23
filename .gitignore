@@ -1,0 +1,74 @@
+# ─── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+*.env
+*.env.local
+
+# Alembic
+alembic.ini.local
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+.pytype/
+.pyre/
+
+# Testing
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+
+# ─── Node / Next.js ──────────────────────────────────────────────────────────
+node_modules/
+.next/
+out/
+.nuxt/
+dist/
+*.tsbuildinfo
+.turbo/
+
+# ─── Secrets & env ───────────────────────────────────────────────────────────
+.env
+.env.*.local
+*.pem
+*.key
+*.p12
+*.pfx
+
+# ─── Docker ───────────────────────────────────────────────────────────────────
+*.log
+docker-compose.override.yml
+
+# ─── Editor / OS ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*.orig
+
+# ─── Model weights / large binary artefacts ──────────────────────────────────
+*.onnx
+*.pkl
+*.pt
+*.pth
+ml/models/
+ml/.insightface/
+
+# ─── Local test images ───────────────────────────────────────────────────────
+data/
+test_images/

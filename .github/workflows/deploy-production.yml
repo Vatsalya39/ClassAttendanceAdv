@@ -1,0 +1,81 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Production deploy — MANUAL dispatch only, gated by the GitHub `production`
+# environment (configure required reviewers: Settings → Environments →
+# production → Required reviewers).
+#
+# Same pipeline as staging against production resources. The migration step
+# runs before rollout; partitioned-table migrations are non-blocking by
+# design (brief lock on the NEW partition only — existing monthly partitions
+# and live attendance writes are untouched).
+#
+# Extra required secrets/vars: AZURE_RESOURCE_GROUP_PRODUCTION,
+# PRODUCTION_ACR_LOGIN_SERVER, AZURE_STATIC_WEB_APPS_API_TOKEN_PROD
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: deploy-production
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag to promote (defaults to latest)'
+        required: false
+        default: 'latest'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy-production:
+    runs-on: ubuntu-latest
+    environment: production # ← attach required reviewers here in repo settings
+    env:
+      RG: ${{ vars.AZURE_RESOURCE_GROUP_PRODUCTION }}
+      ACR: ${{ vars.PRODUCTION_ACR_LOGIN_SERVER }}
+      TAG: ${{ inputs.image_tag || 'latest' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Run migrations (pre-deploy, inside the VNet)
+        run: |
+          az containerapp job update -g "$RG" -n job-db-migrations \
+            --image "$ACR/attendance-api:$TAG"
+          az containerapp job start -g "$RG" -n job-db-migrations
+
+          for i in $(seq 1 60); do
+            STATUS=$(az containerapp job execution list -g "$RG" -n job-db-migrations \
+              --query "[0].properties.status" -o tsv)
+            echo "migration status: $STATUS"
+            [ "$STATUS" = "Succeeded" ] && break
+            [ "$STATUS" = "Failed" ] && { echo "migration failed — aborting"; exit 1; }
+            sleep 5
+          done
+          [ "$STATUS" = "Succeeded" ] || { echo "migration timed out"; exit 1; }
+
+      - name: Roll out api tier
+        run: az containerapp update -g "$RG" --name attendance-api --image "$ACR/attendance-api:$TAG"
+
+      - name: Roll out worker tiers
+        run: |
+          az containerapp update -g "$RG" --name attendance-worker \
+            --image "$ACR/attendance-worker-ml:$TAG"
+          az containerapp update -g "$RG" --name attendance-ml-inference \
+            --image "$ACR/attendance-worker-gpu:$TAG" || \
+            echo "ml-inference not deployed — skipping"
+
+      - name: Smoke test /health
+        run: |
+          FQDN=$(az containerapp show -g "$RG" --name attendance-api \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          for i in $(seq 1 20); do
+            curl -sf "https://$FQDN/health" && exit 0
+            sleep 5
+          done
+          echo "smoke test failed"; exit 1

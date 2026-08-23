@@ -1,0 +1,530 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.46.1.21595",
+      "templateHash": "6851646547328351404"
+    }
+  },
+  "parameters": {
+    "environmentName": {
+      "type": "string",
+      "metadata": {
+        "description": "Container Apps environment name."
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    },
+    "tags": {
+      "type": "object"
+    },
+    "logAnalyticsWorkspaceId": {
+      "type": "string"
+    },
+    "infrastructureSubnetId": {
+      "type": "string"
+    },
+    "enableGpuWorkloadProfile": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Deploy a GPU workload profile? Requires supported region + subscription quota."
+      }
+    },
+    "gpuWorkloadProfileType": {
+      "type": "string",
+      "defaultValue": "NC24ads-A100-v4",
+      "metadata": {
+        "description": "GPU workload profile type (region-dependent, preview feature)."
+      }
+    },
+    "acrLoginServer": {
+      "type": "string",
+      "metadata": {
+        "description": "ACR login server, e.g. myregistry.azurecr.io."
+      }
+    },
+    "imageTag": {
+      "type": "string",
+      "defaultValue": "latest",
+      "metadata": {
+        "description": "Image tag pulled by every app/job."
+      }
+    },
+    "identityResourceId": {
+      "type": "string"
+    },
+    "serviceBusNamespaceName": {
+      "type": "string",
+      "metadata": {
+        "description": "Service Bus namespace short name — required by the KEDA azure-servicebus scaler."
+      }
+    },
+    "vaultUri": {
+      "type": "string"
+    },
+    "apiMinReplicas": {
+      "type": "int",
+      "defaultValue": 1,
+      "metadata": {
+        "description": "Minimum API replicas (keep ≥1 so the public endpoint never cold-starts)."
+      }
+    },
+    "apiMaxReplicas": {
+      "type": "int",
+      "defaultValue": 10
+    },
+    "workerMaxReplicas": {
+      "type": "int",
+      "defaultValue": 20,
+      "metadata": {
+        "description": "CPU worker ceiling — initial estimate until Phase 8 burst tests."
+      }
+    },
+    "mlMaxReplicas": {
+      "type": "int",
+      "defaultValue": 8,
+      "metadata": {
+        "description": "GPU ml-inference ceiling — sized for worst-case concurrent sections; refine after Phase 8."
+      }
+    },
+    "mlInferenceWorkloadProfile": {
+      "type": "string",
+      "defaultValue": "gpu",
+      "allowedValues": [
+        "consumption",
+        "gpu"
+      ]
+    }
+  },
+  "variables": {
+    "copy": [
+      {
+        "name": "commonSecrets",
+        "count": "[length(variables('kvSecrets'))]",
+        "input": {
+          "name": "[variables('kvSecrets')[copyIndex('commonSecrets')].ref]",
+          "keyVaultUrl": "[format('{0}/secrets/{1}', parameters('vaultUri'), variables('kvSecrets')[copyIndex('commonSecrets')].secretName)]",
+          "identity": "[parameters('identityResourceId')]"
+        }
+      }
+    ],
+    "$fxv#0": "-- ─────────────────────────────────────────────────────────────────────────────\n-- infra/scripts/create_partitions.sql\n--\n-- Monthly-partition maintenance for the `attendance` table (idempotent).\n-- Runs daily at 03:00 UTC via the job-partition-maintenance Container Apps\n-- job; mirrors backend/db/partitions.py::ensure_partitions so local dev and\n-- production share one behaviour:\n--   * a DEFAULT catch-all partition (stray dates can never fail an insert)\n--   * the current month + the next 4 months pre-created\n--\n-- CREATE TABLE IF NOT EXISTS ... PARTITION OF is safe to re-run every day;\n-- existing partitions are skipped, new months appear as time advances.\n-- ─────────────────────────────────────────────────────────────────────────────\nDO $$\nDECLARE\n    m date := date_trunc('month', CURRENT_DATE)::date;\n    i int;\n    part_name text;\n    start_date date;\n    end_date date;\nBEGIN\n    -- Catch-all partition: guarantees inserts never hit a missing partition.\n    EXECUTE format(\n        'CREATE TABLE IF NOT EXISTS %I PARTITION OF attendance DEFAULT',\n        'attendance_default'\n    );\n\n    FOR i IN 0..4 LOOP\n        start_date := m + make_interval(months => i);\n        end_date   := start_date + interval '1 month';\n        part_name  := 'attendance_' || to_char(start_date, 'YYYY_MM');\n        EXECUTE format(\n            'CREATE TABLE IF NOT EXISTS %I PARTITION OF attendance '\n            'FOR VALUES FROM (%L) TO (%L)',\n            part_name, start_date, end_date::date\n        );\n    END LOOP;\nEND $$;\n",
+    "kvSecrets": [
+      {
+        "ref": "database-url",
+        "secretName": "Database--ConnectionString"
+      },
+      {
+        "ref": "database-url-sync",
+        "secretName": "Database--SyncConnectionString"
+      },
+      {
+        "ref": "jwt-secret",
+        "secretName": "JwtSecret"
+      },
+      {
+        "ref": "redis-url",
+        "secretName": "Redis--Url"
+      },
+      {
+        "ref": "servicebus-connection-string",
+        "secretName": "ServiceBus--ConnectionString"
+      },
+      {
+        "ref": "storage-connection-string",
+        "secretName": "Storage--ConnectionString"
+      }
+    ],
+    "commonEnv": [
+      {
+        "name": "QUEUE_BACKEND",
+        "value": "servicebus"
+      },
+      {
+        "name": "STORAGE_BACKEND",
+        "value": "azure_blob"
+      },
+      {
+        "name": "ENVIRONMENT",
+        "value": "[parameters('tags').environment]"
+      },
+      {
+        "name": "LOG_LEVEL",
+        "value": "INFO"
+      },
+      {
+        "name": "FACE_MATCH_THRESHOLD",
+        "value": "0.45"
+      },
+      {
+        "name": "AZURE_KEYVAULT_URI",
+        "value": "[parameters('vaultUri')]"
+      }
+    ],
+    "registryBlock": [
+      {
+        "server": "[parameters('acrLoginServer')]",
+        "identity": "[parameters('identityResourceId')]"
+      }
+    ],
+    "servicebusScaleMetadata": {
+      "queueName": "capture-jobs",
+      "namespace": "[parameters('serviceBusNamespaceName')]",
+      "messageCount": "5",
+      "cloud": "AzurePublicCloud"
+    },
+    "servicebusScaleAuth": [
+      {
+        "triggerParameter": "connection",
+        "secretRef": "servicebus-connection-string"
+      }
+    ],
+    "mlScaleMetadata": "[union(variables('servicebusScaleMetadata'), createObject('messageCount', '3'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.App/managedEnvironments",
+      "apiVersion": "2024-03-01",
+      "name": "[parameters('environmentName')]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]",
+      "properties": {
+        "appLogsConfiguration": {
+          "destination": "log-analytics",
+          "logAnalyticsConfiguration": {
+            "customerId": "[reference(parameters('logAnalyticsWorkspaceId'), '2023-09-01').customerId]",
+            "sharedKey": "[listKeys(parameters('logAnalyticsWorkspaceId'), '2023-09-01').primarySharedKey]"
+          }
+        },
+        "vnetConfiguration": {
+          "internal": false,
+          "infrastructureSubnetId": "[parameters('infrastructureSubnetId')]"
+        },
+        "workloadProfiles": "[if(parameters('enableGpuWorkloadProfile'), createArray(createObject('name', 'consumption', 'workloadProfileType', 'Consumption'), createObject('name', 'gpu', 'workloadProfileType', parameters('gpuWorkloadProfileType'), 'minimumCount', 0, 'maximumCount', 3)), createArray(createObject('name', 'consumption', 'workloadProfileType', 'Consumption')))]"
+      }
+    },
+    {
+      "type": "Microsoft.App/containerApps",
+      "apiVersion": "2024-03-01",
+      "name": "attendance-api",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]",
+      "identity": {
+        "type": "UserAssigned",
+        "userAssignedIdentities": {
+          "[format('{0}', parameters('identityResourceId'))]": {}
+        }
+      },
+      "properties": {
+        "managedEnvironmentId": "[resourceId('Microsoft.App/managedEnvironments', parameters('environmentName'))]",
+        "workloadProfileName": "consumption",
+        "configuration": {
+          "activeRevisionsMode": "Single",
+          "secrets": "[variables('commonSecrets')]",
+          "registries": "[variables('registryBlock')]",
+          "ingress": {
+            "external": true,
+            "targetPort": 8000,
+            "transport": "auto",
+            "allowInsecure": false
+          }
+        },
+        "template": {
+          "containers": [
+            {
+              "name": "api",
+              "image": "[format('{0}/attendance-api:{1}', parameters('acrLoginServer'), parameters('imageTag'))]",
+              "resources": {
+                "cpu": "[json('1.0')]",
+                "memory": "2Gi"
+              },
+              "env": "[concat(variables('commonEnv'), createArray(createObject('name', 'DATABASE_URL', 'secretRef', 'database-url'), createObject('name', 'JWT_SECRET_KEY', 'secretRef', 'jwt-secret'), createObject('name', 'REDIS_URL', 'secretRef', 'redis-url')))]",
+              "probes": [
+                {
+                  "type": "Liveness",
+                  "httpGet": {
+                    "path": "/health",
+                    "port": 8000,
+                    "httpHeaders": []
+                  },
+                  "initialDelaySeconds": 10,
+                  "periodSeconds": 15
+                }
+              ]
+            }
+          ],
+          "scale": {
+            "minReplicas": "[parameters('apiMinReplicas')]",
+            "maxReplicas": "[parameters('apiMaxReplicas')]",
+            "rules": [
+              {
+                "name": "http-concurrency",
+                "http": {
+                  "metadata": {
+                    "concurrentRequests": "50"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.App/managedEnvironments', parameters('environmentName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.App/containerApps",
+      "apiVersion": "2024-03-01",
+      "name": "attendance-worker",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]",
+      "identity": {
+        "type": "UserAssigned",
+        "userAssignedIdentities": {
+          "[format('{0}', parameters('identityResourceId'))]": {}
+        }
+      },
+      "properties": {
+        "managedEnvironmentId": "[resourceId('Microsoft.App/managedEnvironments', parameters('environmentName'))]",
+        "workloadProfileName": "consumption",
+        "configuration": {
+          "activeRevisionsMode": "Single",
+          "secrets": "[variables('commonSecrets')]",
+          "registries": "[variables('registryBlock')]"
+        },
+        "template": {
+          "containers": [
+            {
+              "name": "worker",
+              "image": "[format('{0}/attendance-worker-ml:{1}', parameters('acrLoginServer'), parameters('imageTag'))]",
+              "command": [
+                "python",
+                "-m",
+                "backend.worker.main"
+              ],
+              "resources": {
+                "cpu": "[json('1.0')]",
+                "memory": "2Gi"
+              },
+              "env": "[concat(variables('commonEnv'), createArray(createObject('name', 'DATABASE_URL', 'secretRef', 'database-url'), createObject('name', 'JWT_SECRET_KEY', 'secretRef', 'jwt-secret'), createObject('name', 'REDIS_URL', 'secretRef', 'redis-url'), createObject('name', 'SERVICE_BUS_CONNECTION_STRING', 'secretRef', 'servicebus-connection-string')))]"
+            }
+          ],
+          "scale": {
+            "minReplicas": 0,
+            "maxReplicas": "[parameters('workerMaxReplicas')]",
+            "rules": [
+              {
+                "name": "queue-depth",
+                "custom": {
+                  "type": "azure-servicebus",
+                  "metadata": "[variables('servicebusScaleMetadata')]",
+                  "auth": "[variables('servicebusScaleAuth')]"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.App/managedEnvironments', parameters('environmentName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.App/containerApps",
+      "apiVersion": "2024-03-01",
+      "name": "attendance-ml-inference",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]",
+      "identity": {
+        "type": "UserAssigned",
+        "userAssignedIdentities": {
+          "[format('{0}', parameters('identityResourceId'))]": {}
+        }
+      },
+      "properties": {
+        "managedEnvironmentId": "[resourceId('Microsoft.App/managedEnvironments', parameters('environmentName'))]",
+        "workloadProfileName": "[parameters('mlInferenceWorkloadProfile')]",
+        "configuration": {
+          "activeRevisionsMode": "Single",
+          "secrets": "[variables('commonSecrets')]",
+          "registries": "[variables('registryBlock')]",
+          "ingress": {
+            "external": false,
+            "targetPort": 8000,
+            "transport": "auto"
+          }
+        },
+        "template": {
+          "containers": [
+            {
+              "name": "ml-inference",
+              "image": "[format('{0}/attendance-worker-gpu:{1}', parameters('acrLoginServer'), parameters('imageTag'))]",
+              "command": [
+                "python",
+                "-m",
+                "backend.worker.main"
+              ],
+              "resources": {
+                "cpu": "[json('2.0')]",
+                "memory": "8Gi"
+              },
+              "env": "[concat(variables('commonEnv'), createArray(createObject('name', 'DATABASE_URL', 'secretRef', 'database-url'), createObject('name', 'JWT_SECRET_KEY', 'secretRef', 'jwt-secret'), createObject('name', 'REDIS_URL', 'secretRef', 'redis-url'), createObject('name', 'SERVICE_BUS_CONNECTION_STRING', 'secretRef', 'servicebus-connection-string')))]",
+              "probes": [
+                {
+                  "type": "Liveness",
+                  "httpGet": {
+                    "path": "/health",
+                    "port": 8000,
+                    "httpHeaders": []
+                  },
+                  "initialDelaySeconds": 30,
+                  "periodSeconds": 20
+                }
+              ]
+            }
+          ],
+          "scale": {
+            "minReplicas": 0,
+            "maxReplicas": "[parameters('mlMaxReplicas')]",
+            "rules": [
+              {
+                "name": "queue-depth-gpu",
+                "custom": {
+                  "type": "azure-servicebus",
+                  "metadata": "[variables('mlScaleMetadata')]",
+                  "auth": "[variables('servicebusScaleAuth')]"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.App/managedEnvironments', parameters('environmentName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.App/jobs",
+      "apiVersion": "2024-03-01",
+      "name": "job-db-migrations",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]",
+      "identity": {
+        "type": "UserAssigned",
+        "userAssignedIdentities": {
+          "[format('{0}', parameters('identityResourceId'))]": {}
+        }
+      },
+      "properties": {
+        "environmentId": "[resourceId('Microsoft.App/managedEnvironments', parameters('environmentName'))]",
+        "configuration": {
+          "triggerType": "Manual",
+          "replicaTimeout": 1800,
+          "replicaRetryLimit": 0,
+          "manualTriggerConfig": {
+            "parallelism": 1,
+            "replicaCompletionCount": 1
+          },
+          "registries": "[variables('registryBlock')]",
+          "secrets": "[variables('commonSecrets')]"
+        },
+        "template": {
+          "containers": [
+            {
+              "name": "migrator",
+              "image": "[format('{0}/attendance-api:{1}', parameters('acrLoginServer'), parameters('imageTag'))]",
+              "command": [
+                "sh",
+                "-c",
+                "DATABASE_URL_SYNC=$DATABASE_URL_SYNC alembic upgrade head"
+              ],
+              "resources": {
+                "cpu": "[json('0.5')]",
+                "memory": "1Gi"
+              },
+              "env": "[concat(variables('commonEnv'), createArray(createObject('name', 'DATABASE_URL_SYNC', 'secretRef', 'database-url-sync'), createObject('name', 'JWT_SECRET_KEY', 'secretRef', 'jwt-secret'), createObject('name', 'REDIS_URL', 'secretRef', 'redis-url')))]"
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.App/managedEnvironments', parameters('environmentName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.App/jobs",
+      "apiVersion": "2024-03-01",
+      "name": "job-partition-maintenance",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]",
+      "properties": {
+        "environmentId": "[resourceId('Microsoft.App/managedEnvironments', parameters('environmentName'))]",
+        "configuration": {
+          "triggerType": "Schedule",
+          "replicaTimeout": 600,
+          "replicaRetryLimit": 2,
+          "scheduleTriggerConfig": {
+            "cronExpression": "0 0 3 * * *",
+            "parallelism": 1,
+            "replicaCompletionCount": 1
+          },
+          "secrets": "[concat(variables('commonSecrets'), createArray(createObject('name', 'partition-sql', 'value', variables('$fxv#0'))))]"
+        },
+        "template": {
+          "containers": [
+            {
+              "name": "partition-maintainer",
+              "image": "postgres:16-alpine",
+              "command": [
+                "sh",
+                "-c",
+                "psql \"$DATABASE_URL_SYNC\" -v ON_ERROR_STOP=1 -c \"$PARTITION_SQL\""
+              ],
+              "resources": {
+                "cpu": "[json('0.25')]",
+                "memory": "512Mi"
+              },
+              "env": [
+                {
+                  "name": "DATABASE_URL_SYNC",
+                  "secretRef": "database-url-sync"
+                },
+                {
+                  "name": "PGOPTIONS",
+                  "value": "-c lock_timeout=30000 -c statement_timeout=600000"
+                },
+                {
+                  "name": "PARTITION_SQL",
+                  "secretRef": "partition-sql"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.App/managedEnvironments', parameters('environmentName'))]"
+      ]
+    }
+  ],
+  "outputs": {
+    "environmentId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.App/managedEnvironments', parameters('environmentName'))]"
+    },
+    "apiFqdn": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.App/containerApps', 'attendance-api'), '2024-03-01').configuration.ingress.fqdn]"
+    },
+    "migrationJobName": {
+      "type": "string",
+      "value": "job-db-migrations"
+    }
+  }
+}

@@ -1,0 +1,134 @@
+services:
+  # ── PostgreSQL with pgvector ─────────────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: attendance_postgres
+    environment:
+      POSTGRES_USER: attendance
+      POSTGRES_PASSWORD: attendance
+      POSTGRES_DB: attendance_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U attendance -d attendance_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── Redis (queue + cache + rate limiting) ─────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: attendance_redis
+    ports:
+      - "6379:6379"
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── API server ────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: api
+    container_name: attendance_api
+    env_file:
+      - .env
+    environment:
+      # Override specific values for container networking
+      DATABASE_URL: postgresql+asyncpg://attendance:attendance@postgres:5432/attendance_db
+      DATABASE_URL_SYNC: postgresql+psycopg2://attendance:attendance@postgres:5432/attendance_db
+      REDIS_URL: redis://redis:6379/0
+      QUEUE_BACKEND: redis
+      STORAGE_BACKEND: local
+      STORAGE_LOCAL_ROOT: /app/data/uploads
+      API_HOST: 0.0.0.0
+      API_PORT: "8000"
+      CORS_ORIGINS: "http://localhost:3000"
+      ENVIRONMENT: development
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app/backend
+      - ./ml:/app/ml
+      - uploads_data:/app/data/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    command: >
+      uvicorn backend.api.main:app
+        --host 0.0.0.0
+        --port 8000
+        --reload
+        --reload-dir /app/backend
+
+  # ── Worker ────────────────────────────────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: worker
+    container_name: attendance_worker
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://attendance:attendance@postgres:5432/attendance_db
+      DATABASE_URL_SYNC: postgresql+psycopg2://attendance:attendance@postgres:5432/attendance_db
+      REDIS_URL: redis://redis:6379/0
+      QUEUE_BACKEND: redis
+      QUEUE_NAME: capture-jobs
+      STORAGE_BACKEND: local
+      STORAGE_LOCAL_ROOT: /app/data/uploads
+      ENVIRONMENT: development
+    volumes:
+      - ./backend:/app/backend
+      - ./ml:/app/ml
+      - uploads_data:/app/data/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: python -m backend.worker.main
+
+  # ── Frontend (Next.js dev server) ─────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: development
+    container_name: attendance_frontend
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      # Use internal URL for server-side fetch inside the compose network
+      API_URL_INTERNAL: http://api:8000
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+    depends_on:
+      api:
+        condition: service_healthy
+    command: npm run dev
+
+volumes:
+  postgres_data:
+  redis_data:
+  uploads_data:
