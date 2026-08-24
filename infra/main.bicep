@@ -39,6 +39,9 @@ param enableGpuWorkloadProfile bool = false
 @description('Image tag pulled by apps/jobs (Phase 7 CI pushes real tags).')
 param imageTag string = 'latest'
 
+@description('Frontend origin allowed by API CORS (filled after first deploy).')
+param frontendOrigin string = ''
+
 param workerMaxReplicas int = 20
 
 param mlMaxReplicas int = 8
@@ -174,7 +177,7 @@ module keyvault 'modules/keyvault.bicep' = {
     keyVaultName: resourceNames.keyvault
     identityPrincipalId: identity.properties.principalId
     jwtSecret: jwtSecret
-    postgresConnectionString: 'postgresql+asyncpg://${postgresAdminLogin}:${postgresAdminPassword}@${pgFqdn}:5432/${databaseName}?sslmode=require'
+    postgresConnectionString: 'postgresql+asyncpg://${postgresAdminLogin}:${postgresAdminPassword}@${pgFqdn}:5432/${databaseName}'
     postgresSyncConnectionString: 'postgresql+psycopg2://${postgresAdminLogin}:${postgresAdminPassword}@${pgFqdn}:5432/${databaseName}?sslmode=require'
     redisConnectionString: redisUrl
     serviceBusConnectionString: servicebus.outputs.connectionString
@@ -200,6 +203,7 @@ module containerApps 'modules/container_apps.bicep' = {
     identityResourceId: identity.id
     serviceBusNamespaceName: resourceNames.servicebus
     vaultUri: keyvault.outputs.vaultUri
+    corsOrigins: 'http://localhost:3000${frontendOrigin != '' ? ',${frontendOrigin}' : ''}'
     apiMinReplicas: apiMinReplicas
     apiMaxReplicas: apiMaxReplicas
     workerMaxReplicas: workerMaxReplicas
@@ -217,6 +221,7 @@ module containerApps 'modules/container_apps.bicep' = {
 // ── Outputs ──────────────────────────────────────────────────────────────────
 
 output apiFqdn string = containerApps.outputs.apiFqdn
+output frontendFqdn string = containerApps.outputs.frontendFqdn
 output acrLoginServer string = acr.outputs.loginServer
 output keyVaultName string = keyvault.outputs.vaultName
 output migrationJobName string = containerApps.outputs.migrationJobName

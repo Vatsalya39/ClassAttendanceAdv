@@ -17,9 +17,8 @@ from __future__ import annotations
 
 import json as _json
 from enum import Enum
-from typing import Annotated
 
-from pydantic import BeforeValidator, Field
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,9 +32,6 @@ def _parse_cors(v: object) -> list[str]:
             return [str(o).strip() for o in _json.loads(raw)]
         return [origin.strip() for origin in raw.split(",") if origin.strip()]
     raise TypeError(f"Cannot parse cors_origins from {type(v)}: {v!r}")
-
-
-CorsOriginsList = Annotated[list[str], BeforeValidator(_parse_cors)]
 
 
 class QueueBackendType(str, Enum):
@@ -72,6 +68,9 @@ class Settings(BaseSettings):
         ...,
         description="Sync DSN for Alembic (postgresql+psycopg2://...)",
     )
+    # asyncpg does NOT understand ?sslmode= in the URL (psycopg-only) — TLS
+    # for Azure Flexible Server is enabled via this flag instead (session.py).
+    db_ssl: bool = False
     db_pool_size: int = Field(default=10, ge=1)
     db_max_overflow: int = Field(default=20, ge=0)
 
@@ -124,9 +123,14 @@ class Settings(BaseSettings):
     # ── API server ────────────────────────────────────────────────────────────
     api_host: str = "0.0.0.0"
     api_port: int = 8000
-    # cors_origins accepts either a JSON array ("[\"http://a\", \"http://b\"]") or
-    # a plain comma-separated string ("http://a,http://b") — both are valid in .env.
-    cors_origins: CorsOriginsList = ["http://localhost:3000"]
+    # Comma-separated origins (JSON array also accepted). Kept as a plain str:
+    # pydantic-settings JSON-decodes list-typed env values BEFORE BeforeValidator
+    # runs, which crashed on plain "a,b" values from Container Apps.
+    cors_origins: str = "http://localhost:3000"
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return _parse_cors(self.cors_origins)
 
     # ── Worker ────────────────────────────────────────────────────────────────
     worker_concurrency: int = Field(default=4, ge=1)

@@ -53,6 +53,9 @@ param identityResourceId string
 @description('Service Bus namespace short name — required by the KEDA azure-servicebus scaler.')
 param serviceBusNamespaceName string
 
+@description('Comma-separated CORS origins for the API (frontend URL).')
+param corsOrigins string = 'http://localhost:3000'
+
 param vaultUri string
 
 @description('Minimum API replicas — 0 in staging: cold start on first request, zero idle cost.')
@@ -133,6 +136,7 @@ var commonEnv = [
   { name: 'QUEUE_BACKEND', value: 'servicebus' }
   { name: 'STORAGE_BACKEND', value: 'azure_blob' }
   { name: 'ENVIRONMENT', value: appEnvironment }
+  { name: 'DB_SSL', value: 'true' }
   { name: 'LOG_LEVEL', value: 'INFO' }
   { name: 'FACE_MATCH_THRESHOLD', value: '0.45' } // recalibrate in Phase 8
   { name: 'AZURE_KEYVAULT_URI', value: vaultUri }
@@ -184,6 +188,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
               { name: 'JWT_SECRET_KEY', secretRef: 'jwt-secret' }
               { name: 'REDIS_URL', secretRef: 'redis-url' }
               { name: 'SERVICE_BUS_CONNECTION_STRING', secretRef: 'servicebus-connection-string' }
+              { name: 'CORS_ORIGINS', value: corsOrigins }
             ]
           )
           probes: [
@@ -394,7 +399,50 @@ resource mlInferenceApp 'Microsoft.App/containerApps@2024-03-01' = {
   }
 }
 
+
+// ── Frontend (Next.js standalone) ────────────────────────────────────────────
+resource frontendApp 'Microsoft.App/containerApps@2024-03-01' = {
+  name: 'attendance-frontend'
+  location: location
+  tags: tags
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: { '${identityResourceId}': {} }
+  }
+  properties: {
+    managedEnvironmentId: env.id
+    workloadProfileName: 'consumption'
+    configuration: {
+      activeRevisionsMode: 'Single'
+      registries: registryBlock
+      ingress: {
+        external: true
+        targetPort: 3000
+        transport: 'auto'
+        allowInsecure: false
+      }
+    }
+    template: {
+      containers: [
+        {
+          name: 'frontend'
+          image: '${acrLoginServer}/attendance-frontend:${imageTag}'
+          resources: { cpu: json('0.5'), memory: '1Gi' }
+        }
+      ]
+      scale: {
+        minReplicas: 0 // cold start on first visit in staging
+        maxReplicas: 3
+        rules: [
+          { name: 'http', http: { metadata: { concurrentRequests: '50' } } }
+        ]
+      }
+    }
+  }
+}
+
 // ── Migration job (manual trigger — Phase 7 pipeline starts it pre-deploy) ───
+
 
 resource migrationJob 'Microsoft.App/jobs@2024-03-01' = {
   name: 'job-db-migrations'
@@ -498,4 +546,5 @@ resource partitionJob 'Microsoft.App/jobs@2024-03-01' = {
 
 output environmentId string = env.id
 output apiFqdn string = apiApp.properties.configuration.ingress.fqdn
+output frontendFqdn string = frontendApp.properties.configuration.ingress.fqdn
 output migrationJobName string = migrationJob.name

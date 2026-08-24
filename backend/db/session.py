@@ -36,8 +36,12 @@ def get_engine() -> AsyncEngine:
     """Lazily create (and cache) the process-wide async engine."""
     global _engine
     if _engine is None:
+        # Azure Flexible Server requires TLS; asyncpg needs it via connect_args
+        # (a ?sslmode= query param raises TypeError in asyncpg).
+        connect_args = {"ssl": True} if settings.db_ssl else {}
         _engine = create_async_engine(
             settings.database_url,
+            connect_args=connect_args,
             pool_size=settings.db_pool_size,
             max_overflow=settings.db_max_overflow,
             pool_pre_ping=True,
