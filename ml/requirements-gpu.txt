@@ -1,0 +1,24 @@
+# ─── ML / inference dependencies ──────────────────────────────────────────────
+# Install into the ml-inference container image (GPU build).
+
+# InsightFace (RetinaFace detection + ArcFace recognition)
+insightface==0.7.3
+
+# ONNX Runtime — choose ONE of the two lines below:
+onnxruntime-gpu==1.29.0      # GPU build (CUDA 12.x) — use in Docker / Azure GPU
+
+# Note: ONNX Runtime silently drops execution providers it cannot initialise.
+# Listing ["CUDAExecutionProvider", "CPUExecutionProvider"] in _get_app() works
+# correctly on both GPU and CPU-only machines with no code change required.
+
+# Image / array processing
+numpy==1.26.4
+Pillow==10.3.0
+opencv-python-headless==4.10.0.82
+
+# scikit-learn needed for calibration scripts (PCA, threshold sweep)
+scikit-learn==1.5.0
+matplotlib==3.9.0             # Threshold calibration charts
+
+# Benchmarking
+tqdm==4.66.4

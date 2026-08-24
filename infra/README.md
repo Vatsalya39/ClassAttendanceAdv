@@ -105,6 +105,17 @@ az deployment group what-if -g $RG -f infra/main.bicep \
   -p infra/parameters/staging.bicepparam
 ```
 
+## 5b. Post-provision: allow-list pgvector (manual, required once)
+
+The Flexible Server `configurations` API rejects ARM/Bicep writes for
+`azure.extensions`, so run this once per server before starting the migration
+job (otherwise `CREATE EXTENSION vector` fails):
+
+```bash
+az postgres flexible-server parameter set \
+  -g $RG -s <primary-server-name> -n azure.extensions --value vector
+```
+
 ## Partition maintenance
 
 `job-partition-maintenance` runs daily at 03:00 UTC (`psql` executing

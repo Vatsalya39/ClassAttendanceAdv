@@ -61,6 +61,14 @@ resource appsSubnet 'Microsoft.Network/virtualNetworks/subnets@2023-11-01' = {
   properties: {
     addressPrefix: '10.10.4.0/23'
     privateEndpointNetworkPolicies: 'Disabled'
+    delegations: [
+      {
+        name: 'appEnvironmentDelegation'
+        properties: {
+          serviceName: 'Microsoft.App/environments'
+        }
+      }
+    ]
   }
 }
 

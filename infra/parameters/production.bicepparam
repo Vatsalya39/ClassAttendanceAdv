@@ -15,7 +15,6 @@ param jwtSecret = 'REPLACE_ME_run_python_c_import_secrets_token_hex_64'
 
 param postgresSkuName = 'Standard_D4ds_v5' // 4 vCore / 16 GiB — see modules/database.bicep rationale
 param postgresHighAvailability = 'ZoneRedundant'
-param redisSkuName = 'Premium_P1'
 param enableGpuWorkloadProfile = true // requires region + quota; see README
 param imageTag = 'latest'
 param apiMinReplicas = 2

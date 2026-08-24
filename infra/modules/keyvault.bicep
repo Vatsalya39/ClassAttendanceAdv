@@ -22,6 +22,9 @@ param jwtSecret string
 param postgresConnectionString string
 
 @secure()
+param postgresSyncConnectionString string
+
+@secure()
 param redisConnectionString string
 
 @secure()
@@ -49,7 +52,8 @@ resource vault 'Microsoft.KeyVault/vaults@2023-07-01' = {
 
 var secrets = [
   { name: 'Database--ConnectionString', value: postgresConnectionString }
-  { name: 'Redis--ConnectionString', value: redisConnectionString }
+  { name: 'Database--SyncConnectionString', value: postgresSyncConnectionString }
+  { name: 'Redis--Url', value: redisConnectionString }
   { name: 'ServiceBus--ConnectionString', value: serviceBusConnectionString }
   { name: 'Storage--ConnectionString', value: storageConnectionString }
   { name: 'JwtSecret', value: jwtSecret }

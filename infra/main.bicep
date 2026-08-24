@@ -27,14 +27,11 @@ param postgresAdminPassword string
 @description('JWT signing secret — generate with: python -c "import secrets; print(secrets.token_hex(64))"')
 param jwtSecret string
 
-@description('Postgres SKU (initial estimate; refine after Phase 8 burst tests).')
-param postgresSkuName string = 'Standard_D4ds_v5'
+@description('Postgres SKU — Standard_B1ms is free-tier eligible for 12 months on student subscriptions.')
+param postgresSkuName string = 'Standard_B1ms'
 
-@allowed(['ZoneRedundant', 'SameZone', 'None'])
-param postgresHighAvailability string = 'None'
-
-@allowed(['Standard_C1', 'Premium_P1'])
-param redisSkuName string = 'Standard_C1'
+@allowed(['ZoneRedundant', 'SameZone', 'Disabled'])
+param postgresHighAvailability string = 'Disabled'
 
 @description('GPU workload profile requires supported region + quota; disable for staging.')
 param enableGpuWorkloadProfile bool = false
@@ -60,8 +57,6 @@ var nameSuffix = uniqueString(resourceGroup().id)
 var resourceNames = {
   vnet: 'vnet-attendance-${environmentName}'
   postgresPrimary: 'pg-att-${environmentName}-${nameSuffix}'
-  postgresReplica: 'pg-att-${environmentName}-ro-${nameSuffix}'
-  redis: 'redis-att-${environmentName}-${nameSuffix}'
   servicebus: 'sb-att-${environmentName}-${nameSuffix}'
   storage: 'stattn${environmentName}${nameSuffix}' // lowercase alphanumeric only
   keyvault: 'kv-att-${environmentName}-${nameSuffix}'
@@ -69,7 +64,6 @@ var resourceNames = {
   logAnalytics: 'log-att-${environmentName}-${nameSuffix}'
   identity: 'id-att-${environmentName}-${nameSuffix}'
   containerEnv: 'cae-att-${environmentName}'
-  staticSite: 'swa-att-${environmentName}-${nameSuffix}'
 }
 var databaseName = 'attendance_db'
 
@@ -136,7 +130,6 @@ module database 'modules/database.bicep' = {
   name: 'database'
   params: {
     primaryServerName: resourceNames.postgresPrimary
-    replicaServerName: resourceNames.postgresReplica
     administratorLogin: postgresAdminLogin
     administratorPassword: postgresAdminPassword
     skuName: postgresSkuName
@@ -152,24 +145,10 @@ module database 'modules/database.bicep' = {
 
 // ── Cache / queue / storage ──────────────────────────────────────────────────
 
-module redis 'modules/redis.bicep' = {
-  name: 'redis'
-  params: {
-    redisName: resourceNames.redis
-    skuName: redisSkuName
-    subnetId: networking.outputs.redisSubnetId
-    location: location
-    tags: tags
-  }
-}
-
 module servicebus 'modules/servicebus.bicep' = {
-  name: 'servicebus'
+  name: 'servicebus-ref'
   params: {
     namespaceName: resourceNames.servicebus
-    queueName: 'capture-jobs'
-    location: location
-    tags: tags
   }
 }
 
@@ -185,8 +164,9 @@ module storage 'modules/storage.bicep' = {
 // ── Key Vault (secrets composed from module outputs) ─────────────────────────
 
 var pgFqdn = database.outputs.primaryServerFqdn
-var redisHost = redis.outputs.redisHostName
-var redisKey = redis.outputs.redisPrimaryKey
+// Staging: internal Container App redis (see container_apps.bicep).
+// Production: swap for Azure Managed Redis URL here.
+var redisUrl = 'redis://attendance-redis:6379/0'
 
 module keyvault 'modules/keyvault.bicep' = {
   name: 'keyvault'
@@ -195,7 +175,8 @@ module keyvault 'modules/keyvault.bicep' = {
     identityPrincipalId: identity.properties.principalId
     jwtSecret: jwtSecret
     postgresConnectionString: 'postgresql+asyncpg://${postgresAdminLogin}:${postgresAdminPassword}@${pgFqdn}:5432/${databaseName}?sslmode=require'
-    redisConnectionString: 'rediss://:${redisKey}@${redisHost}:6380/0'
+    postgresSyncConnectionString: 'postgresql+psycopg2://${postgresAdminLogin}:${postgresAdminPassword}@${pgFqdn}:5432/${databaseName}?sslmode=require'
+    redisConnectionString: redisUrl
     serviceBusConnectionString: servicebus.outputs.connectionString
     storageConnectionString: storage.outputs.connectionString
     location: location
@@ -228,15 +209,10 @@ module containerApps 'modules/container_apps.bicep' = {
 }
 
 // ── Frontend ─────────────────────────────────────────────────────────────────
-
-module staticSite 'modules/static_web_app.bicep' = {
-  name: 'staticSite'
-  params: {
-    staticSiteName: resourceNames.staticSite
-    location: location
-    tags: tags
-  }
-}
+// NOTE: Static Web Apps cannot be created via ARM without a linked git repo,
+// so infra/README.md §7 provisions it as a "disconnected" SWA via
+// `az staticwebapp create` (no --source); the Phase 7 workflow then deploys
+// builds with the SWA deploy token.
 
 // ── Outputs ──────────────────────────────────────────────────────────────────
 
@@ -244,6 +220,4 @@ output apiFqdn string = containerApps.outputs.apiFqdn
 output acrLoginServer string = acr.outputs.loginServer
 output keyVaultName string = keyvault.outputs.vaultName
 output migrationJobName string = containerApps.outputs.migrationJobName
-output frontendHostname string = staticSite.outputs.defaultHostname
 output postgresPrimaryFqdn string = pgFqdn
-output postgresReplicaFqdn string = database.outputs.replicaServerFqdn

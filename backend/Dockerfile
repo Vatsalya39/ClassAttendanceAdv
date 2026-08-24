@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Copy dependency manifest first (layer cache)
-COPY pyproject.toml poetry.lock ./
+COPY pyproject.toml poetry.lock alembic.ini ./
 
 # Install Poetry then all deps (runs from repo root where pyproject.toml now lives)
 RUN pip install --no-cache-dir poetry==1.8.3 \
@@ -48,8 +48,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY ml/requirements.txt ml/requirements.txt
-RUN pip install --no-cache-dir -r ml/requirements.txt
+COPY ml/requirements-cpu.txt ml/requirements-cpu.txt
+RUN pip install --no-cache-dir -r ml/requirements-cpu.txt
 
 CMD ["python", "-m", "backend.worker.main"]
 
@@ -87,7 +87,7 @@ WORKDIR /app
 
 # Runtime subset of pyproject main deps needed by the worker process,
 # installed directly (poetry resolution on this base adds no value).
-COPY pyproject.toml poetry.lock ./
+COPY pyproject.toml poetry.lock alembic.ini ./
 RUN python3 -m pip install --upgrade pip \
     && pip install --no-cache-dir \
         "sqlalchemy[asyncio]>=2.0.30,<3" \
@@ -107,8 +107,7 @@ RUN python3 -m pip install --upgrade pip \
 COPY backend/ backend/
 COPY ml/ ml/
 COPY scripts/ scripts/
-COPY ml/requirements.txt ml/requirements.txt
-RUN pip install --no-cache-dir -r ml/requirements.txt onnxruntime-gpu==1.18.1 \
-    || pip install --no-cache-dir -r ml/requirements.txt
+COPY ml/requirements-gpu.txt ml/requirements-gpu.txt
+RUN pip install --no-cache-dir -r ml/requirements-gpu.txt
 
 CMD ["python", "-m", "backend.worker.main"]

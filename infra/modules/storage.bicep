@@ -24,7 +24,7 @@ resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: storageAccountName
   location: location
   tags: tags
-  sku: { name: 'Standard_GRS' }
+  sku: { name: 'Standard_LRS' } // cheapest redundancy — staging
   kind: 'StorageV2'
   properties: {
     allowBlobPublicAccess: false // private containers; SAS support is a pre-prod checklist item

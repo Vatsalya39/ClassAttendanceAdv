@@ -1,59 +1,35 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // infra/modules/servicebus.bicep
 //
-// Azure Service Bus namespace + the capture-jobs queue.
+// The Service Bus RP rejects template-driven PUTs on some subscriptions
+// (empty BadRequest) while CLI creation works — so the namespace + queue are
+// provisioned ONCE via az cli (see infra/README.md §0b) and referenced here
+// as EXISTING resources purely to emit the connection string into Key Vault.
 //
-//   LockDuration 5 min  — a classroom photo takes seconds-to-minutes on GPU;
-//                         the lock must outlive slow processing.
-//   MaxDeliveryCount 5  — after 5 failed deliveries (nack) the message lands
-//                         in the dead-letter sub-queue automatically; the
-//                         worker's nack() dead-letters immediately with a
-//                         reason, matching backend/core/queue.py.
-//   MessageTTL 1 day    — stale jobs expire into the DLQ instead of looping.
-//
-// KEDA reads ActiveMessageCount on this queue to scale both worker tiers.
+// Queue settings applied by the CLI (Basic tier):
+//   lockDuration PT5M · maxDeliveryCount 5 (→ DLQ) · message TTL P1D
+//   dead-lettering on expiration enabled
+// Idempotency does NOT rely on SB duplicate detection (unavailable on Basic):
+// workers claim jobs via Redis SET NX; attendance writes are ON CONFLICT.
 // ─────────────────────────────────────────────────────────────────────────────
 
-@description('Service Bus namespace name (globally unique).')
+@description('Service Bus namespace name (must already exist — created by az cli).')
 param namespaceName string
 
-@description('Queue name — keep in sync with QUEUE_NAME app setting.')
-param queueName string = 'capture-jobs'
+param namespaceResourceGroupName string = resourceGroup().name
 
-param location string = resourceGroup().location
-
-param tags object
-
-resource sbns 'Microsoft.ServiceBus/namespaces@2022-10-01-preview' = {
+resource ns 'Microsoft.ServiceBus/namespaces@2024-01-01' existing = {
   name: namespaceName
-  location: location
-  tags: tags
-  sku: {
-    name: 'Standard'
-    tier: 'Standard'
-  }
-  properties: {
-    minimumTlsVersion: '1.2'
-    publicNetworkAccess: 'Enabled' // reachable by GitHub runners for smoke tests; namespace keys live in Key Vault
-    disableLocalAuth: false // connection-string auth used by the apps via Key Vault
-  }
+  scope: resourceGroup(namespaceResourceGroupName)
 }
 
-resource queue 'Microsoft.ServiceBus/namespaces/queues@2022-10-01-preview' = {
-  parent: sbns
-  name: queueName
-  properties: {
-    lockDuration: 'PT5M'
-    maxDeliveryCount: 5
-    defaultMessageTimeToLive: 'P1D'
-    deadLetteringOnMessageExpiration: true
-    requiresDuplicateDetection: true
-    duplicateDetectionHistoryTimeWindow: 'PT10M'
-    maxSizeInMegabytes: 2048
-  }
+// Connection strings live on authorization RULES — namespace-level listKeys
+// does not exist and fails with an opaque BadRequest.
+resource rootRule 'Microsoft.ServiceBus/namespaces/authorizationRules@2024-01-01' existing = {
+  parent: ns
+  name: 'RootManageSharedAccessKey'
 }
 
-output serviceBusNamespaceName string = sbns.name
-output queueName string = queue.name
 #disable-next-line outputs-should-not-contain-secrets
-output connectionString string = sbns.listKeys().primaryConnectionString // consumed only by main.bicep → Key Vault
+output connectionString string = rootRule.listKeys().primaryConnectionString // consumed only by main.bicep → Key Vault
+output serviceBusNamespaceName string = ns.name

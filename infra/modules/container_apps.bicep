@@ -55,8 +55,8 @@ param serviceBusNamespaceName string
 
 param vaultUri string
 
-@description('Minimum API replicas (keep ≥1 so the public endpoint never cold-starts).')
-param apiMinReplicas int = 1
+@description('Minimum API replicas — 0 in staging: cold start on first request, zero idle cost.')
+param apiMinReplicas int = 0
 param apiMaxReplicas int = 10
 
 @description('CPU worker ceiling — initial estimate until Phase 8 burst tests.')
@@ -109,16 +109,30 @@ var kvSecrets = [
   { ref: 'storage-connection-string', secretName: 'Storage--ConnectionString' }
 ]
 
+var trimmedVaultUri = endsWith(vaultUri, '/') ? substring(vaultUri, 0, length(vaultUri) - 1) : vaultUri
+
 var commonSecrets = [for s in kvSecrets: {
   name: s.ref
-  keyVaultUrl: '${vaultUri}/secrets/${s.secretName}'
+  keyVaultUrl: '${trimmedVaultUri}/secrets/${s.secretName}'
   identity: identityResourceId
 }]
+
+// Settings.Environment expects development|staging|production; resource
+// naming uses short codes (stg/prd) — translate here.
+var appEnvironmentMap = {
+  dev: 'development'
+  stg: 'staging'
+  prd: 'production'
+  development: 'development'
+  staging: 'staging'
+  production: 'production'
+}
+var appEnvironment = appEnvironmentMap[tags.environment]
 
 var commonEnv = [
   { name: 'QUEUE_BACKEND', value: 'servicebus' }
   { name: 'STORAGE_BACKEND', value: 'azure_blob' }
-  { name: 'ENVIRONMENT', value: tags.environment }
+  { name: 'ENVIRONMENT', value: appEnvironment }
   { name: 'LOG_LEVEL', value: 'INFO' }
   { name: 'FACE_MATCH_THRESHOLD', value: '0.45' } // recalibrate in Phase 8
   { name: 'AZURE_KEYVAULT_URI', value: vaultUri }
@@ -165,8 +179,11 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
             commonEnv,
             [
               { name: 'DATABASE_URL', secretRef: 'database-url' }
+              { name: 'DATABASE_URL_SYNC', secretRef: 'database-url-sync' }
+              { name: 'AZURE_STORAGE_CONNECTION_STRING', secretRef: 'storage-connection-string' }
               { name: 'JWT_SECRET_KEY', secretRef: 'jwt-secret' }
               { name: 'REDIS_URL', secretRef: 'redis-url' }
+              { name: 'SERVICE_BUS_CONNECTION_STRING', secretRef: 'servicebus-connection-string' }
             ]
           )
           probes: [
@@ -191,6 +208,42 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
           }
         ]
       }
+    }
+  }
+}
+
+
+// ── Internal Redis (staging) ─────────────────────────────────────────────────
+// Classic Azure Cache for Redis is retired for new creations and its
+// replacement (Azure Managed Redis) is not available in centralindia.
+// For staging we run Redis as an always-on internal container — reachable
+// from every tier as `attendance-redis` via the environment's internal DNS.
+// Production should deploy Azure Managed Redis in a supported region.
+resource redisApp 'Microsoft.App/containerApps@2024-03-01' = {
+  name: 'attendance-redis'
+  location: location
+  tags: tags
+  properties: {
+    managedEnvironmentId: env.id
+    workloadProfileName: 'consumption'
+    configuration: {
+      activeRevisionsMode: 'Single'
+      ingress: {
+        external: false
+        targetPort: 6379
+        transport: 'tcp'
+      }
+    }
+    template: {
+      containers: [
+        {
+          name: 'redis'
+          image: 'redis:7.2-alpine'
+          command: ['redis-server', '--save', '60', '1', '--loglevel', 'warning']
+          resources: { cpu: json('0.5'), memory: '1Gi' }
+        }
+      ]
+      scale: { minReplicas: 1, maxReplicas: 1 } // always-on cache
     }
   }
 }
@@ -239,6 +292,8 @@ resource workerApp 'Microsoft.App/containerApps@2024-03-01' = {
             commonEnv,
             [
               { name: 'DATABASE_URL', secretRef: 'database-url' }
+              { name: 'DATABASE_URL_SYNC', secretRef: 'database-url-sync' }
+              { name: 'AZURE_STORAGE_CONNECTION_STRING', secretRef: 'storage-connection-string' }
               { name: 'JWT_SECRET_KEY', secretRef: 'jwt-secret' }
               { name: 'REDIS_URL', secretRef: 'redis-url' }
               { name: 'SERVICE_BUS_CONNECTION_STRING', secretRef: 'servicebus-connection-string' }
@@ -294,16 +349,18 @@ resource mlInferenceApp 'Microsoft.App/containerApps@2024-03-01' = {
       containers: [
         {
           name: 'ml-inference'
-          image: '${acrLoginServer}/attendance-worker-gpu:${imageTag}'
+          image: enableGpuWorkloadProfile ? '${acrLoginServer}/attendance-worker-gpu:${imageTag}' : '${acrLoginServer}/attendance-worker-ml:${imageTag}'
           command: ['python', '-m', 'backend.worker.main']
           resources: {
             cpu: json('2.0')
-            memory: '8Gi' // buffalo_l models ≈ 600 MB + runtime headroom
+            memory: '4Gi' // buffalo_l models ≈ 600 MB. 4Gi matches Azure's 1:2 ratio and protects student credits.
           }
           env: concat(
             commonEnv,
             [
               { name: 'DATABASE_URL', secretRef: 'database-url' }
+              { name: 'DATABASE_URL_SYNC', secretRef: 'database-url-sync' }
+              { name: 'AZURE_STORAGE_CONNECTION_STRING', secretRef: 'storage-connection-string' }
               { name: 'JWT_SECRET_KEY', secretRef: 'jwt-secret' }
               { name: 'REDIS_URL', secretRef: 'redis-url' }
               { name: 'SERVICE_BUS_CONNECTION_STRING', secretRef: 'servicebus-connection-string' }
@@ -375,6 +432,7 @@ resource migrationJob 'Microsoft.App/jobs@2024-03-01' = {
             commonEnv,
             [
               { name: 'DATABASE_URL_SYNC', secretRef: 'database-url-sync' }
+              { name: 'AZURE_STORAGE_CONNECTION_STRING', secretRef: 'storage-connection-string' }
               { name: 'JWT_SECRET_KEY', secretRef: 'jwt-secret' }
               { name: 'REDIS_URL', secretRef: 'redis-url' }
             ]
@@ -391,6 +449,10 @@ resource partitionJob 'Microsoft.App/jobs@2024-03-01' = {
   name: 'job-partition-maintenance'
   location: location
   tags: tags
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: { '${identityResourceId}': {} }
+  }
   properties: {
     environmentId: env.id
     configuration: {
@@ -398,7 +460,7 @@ resource partitionJob 'Microsoft.App/jobs@2024-03-01' = {
       replicaTimeout: 600
       replicaRetryLimit: 2
       scheduleTriggerConfig: {
-        cronExpression: '0 0 3 * * *' // seconds minutes hours day month weekday
+        cronExpression: '0 3 * * *' // seconds minutes hours day month weekday
         parallelism: 1
         replicaCompletionCount: 1
       }
@@ -422,7 +484,7 @@ resource partitionJob 'Microsoft.App/jobs@2024-03-01' = {
             '-c'
             'psql "$DATABASE_URL_SYNC" -v ON_ERROR_STOP=1 -c "$PARTITION_SQL"'
           ]
-          resources: { cpu: json('0.25'), memory: '512Mi' }
+          resources: { cpu: json('0.25'), memory: '0.5Gi' }
           env: [
             { name: 'DATABASE_URL_SYNC', secretRef: 'database-url-sync' }
             { name: 'PGOPTIONS', value: '-c lock_timeout=30000 -c statement_timeout=600000' }
