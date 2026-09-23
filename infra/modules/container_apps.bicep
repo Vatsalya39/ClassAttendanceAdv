@@ -350,37 +350,33 @@ resource mlInferenceApp 'Microsoft.App/containerApps@2024-03-01' = {
         transport: 'auto'
       }
     }
-    template: {
-      containers: [
-        {
-          name: 'ml-inference'
-          image: enableGpuWorkloadProfile ? '${acrLoginServer}/attendance-worker-gpu:${imageTag}' : '${acrLoginServer}/attendance-worker-ml:${imageTag}'
-          command: ['python', '-m', 'backend.worker.main']
-          resources: {
-            cpu: json('2.0')
-            memory: '4Gi' // buffalo_l models ≈ 600 MB. 4Gi matches Azure's 1:2 ratio and protects student credits.
-          }
-          env: concat(
-            commonEnv,
-            [
-              { name: 'DATABASE_URL', secretRef: 'database-url' }
-              { name: 'DATABASE_URL_SYNC', secretRef: 'database-url-sync' }
-              { name: 'AZURE_STORAGE_CONNECTION_STRING', secretRef: 'storage-connection-string' }
-              { name: 'JWT_SECRET_KEY', secretRef: 'jwt-secret' }
-              { name: 'REDIS_URL', secretRef: 'redis-url' }
-              { name: 'SERVICE_BUS_CONNECTION_STRING', secretRef: 'servicebus-connection-string' }
-            ]
-          )
-          probes: [
-            {
-              type: 'Liveness'
-              httpGet: { path: '/health', port: 8000, httpHeaders: [] }
-              initialDelaySeconds: 30 // model warm-up
-              periodSeconds: 20
+      template: {
+        containers: [
+          {
+            name: 'ml-inference'
+            image: enableGpuWorkloadProfile ? '${acrLoginServer}/attendance-worker-gpu:${imageTag}' : '${acrLoginServer}/attendance-worker-ml:${imageTag}'
+            command: ['python', '-m', 'backend.worker.main']
+            resources: {
+              cpu: json('2.0')
+              memory: '4Gi' // buffalo_l models ≈ 600 MB. 4Gi matches Azure's 1:2 ratio and protects student credits.
             }
-          ]
-        }
-      ]
+            env: concat(
+              commonEnv,
+              [
+                { name: 'DATABASE_URL', secretRef: 'database-url' }
+                { name: 'DATABASE_URL_SYNC', secretRef: 'database-url-sync' }
+                { name: 'AZURE_STORAGE_CONNECTION_STRING', secretRef: 'storage-connection-string' }
+                { name: 'JWT_SECRET_KEY', secretRef: 'jwt-secret' }
+                { name: 'REDIS_URL', secretRef: 'redis-url' }
+                { name: 'SERVICE_BUS_CONNECTION_STRING', secretRef: 'servicebus-connection-string' }
+              ]
+            )
+            // NOTE: no HTTP liveness probe — this container is a queue
+            // consumer (backend.worker.main) and never opens port 8000. An
+            // httpGet /health probe can never succeed and restart-loops the
+            // replica. KEDA scaling on queue depth IS the health model.
+          }
+        ]
       scale: {
         minReplicas: 0 // GPU replicas scale away when idle — cost control
         maxReplicas: mlMaxReplicas

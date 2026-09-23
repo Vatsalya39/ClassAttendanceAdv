@@ -76,3 +76,17 @@ ml/.insightface/
 # ─── Local test images ───────────────────────────────────────────────────────
 data/
 test_images/
+
+# ─── Local detection smoke test (never in the repo or production) ────────────
+# Developer-machine-only script + classroom photos + annotated outputs.
+test_local_detection.py
+classroom*.jpg
+classRoom*.jpg
+*_output.jpg
+
+# ─── Presentations, slide generation & test decks ───────────────────────────
+*.pptx
+generate_deck.py
+update_layout.py
+results/
+

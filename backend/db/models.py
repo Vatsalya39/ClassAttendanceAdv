@@ -31,6 +31,7 @@ from datetime import date, datetime  # noqa: TCH003 — needed at runtime by the
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    Boolean,
     Date,
     DateTime,
     Enum,
@@ -163,6 +164,31 @@ class Student(Base):
     institution: Mapped[Institution] = relationship(back_populates="students")
     enrollments: Mapped[list[Enrollment]] = relationship(back_populates="student")
     embeddings: Mapped[list[FaceEmbedding]] = relationship(back_populates="student")
+
+
+class RegistrationToken(Base):
+    """
+    Admin-issued single-use registration tokens tied to a roll number.
+    Ensures that only authorized students possessing a valid token can enroll biometrics.
+    """
+
+    __tablename__ = "registration_tokens"
+
+    token_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    roll_number: Mapped[str] = mapped_column(String(64), index=True)
+    institution_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("institutions.institution_id", ondelete="CASCADE"),
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    is_used: Mapped[bool] = mapped_column(Boolean, default=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    institution: Mapped[Institution] = relationship()
 
 
 class FaceEmbedding(Base):

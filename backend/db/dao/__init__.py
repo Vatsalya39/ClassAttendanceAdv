@@ -31,6 +31,7 @@ from backend.db.dao.attendance import (
 from backend.db.dao.matching import (
     RosterMatch,
     find_nearest_embeddings_for_roster,
+    find_nearest_embeddings_for_student,
     find_nearest_embeddings_institution_wide,
 )
 from backend.db.dao.org import (
@@ -44,6 +45,10 @@ from backend.db.dao.org import (
     list_departments,
     list_institutions,
     list_sections,
+)
+from backend.db.dao.registration_tokens import (
+    create_registration_token,
+    verify_and_consume_registration_token,
 )
 from backend.db.dao.review import (
     ReviewAlreadyResolvedError,
@@ -73,6 +78,7 @@ __all__ = [
     "create_class_session",
     "create_department",
     "create_institution",
+    "create_registration_token",
     "create_section",
     "create_student",
     "delete_attendance_for_student",
@@ -80,6 +86,7 @@ __all__ = [
     "delete_reviews_for_student",
     "enqueue_review",
     "find_nearest_embeddings_for_roster",
+    "find_nearest_embeddings_for_student",
     "find_nearest_embeddings_institution_wide",
     "get_admin_by_username",
     "get_attendance_for_date",
@@ -101,4 +108,5 @@ __all__ = [
     "sections_accessible_to_admin",
     "StudentNotFoundError",
     "StudentWrongInstitutionError",
+    "verify_and_consume_registration_token",
 ]

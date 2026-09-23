@@ -56,7 +56,7 @@ TEST_REDIS_URL = os.environ.get("TEST_REDIS_URL", "redis://localhost:6379/0")
 
 # Tables in dependency order for TRUNCATE ... CASCADE
 _ALL_TABLES = (
-    "audit_log, review_queue, attendance, class_sessions, enrollments, "
+    "registration_tokens, audit_log, review_queue, attendance, class_sessions, enrollments, "
     "face_embeddings, students, sections, departments, institutions, admins"
 )
 

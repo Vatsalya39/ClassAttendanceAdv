@@ -206,6 +206,7 @@ export default function AdminDashboardPage() {
               minShots={1}
               maxShots={1}
               subject="classroom photo"
+              minResolution={1024}
             />
           )}
 

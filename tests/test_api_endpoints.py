@@ -33,7 +33,9 @@ from backend.db import dao
 from backend.db.models import AdminRole, Enrollment
 
 
-def make_jpeg_bytes(size: int = 64) -> bytes:
+def make_jpeg_bytes(size: int = 1080) -> bytes:
+    """Session-photo fixture: default 1080x1080 clears the capture
+    resolution floor (settings.capture_min_image_side = 1024)."""
     import cv2
     import numpy as np
 
@@ -270,6 +272,59 @@ async def test_capture_rate_limited(
     )
     assert resp.status_code == 429
     assert "Retry-After" in resp.headers
+
+
+# ─── Capture resolution floor ─────────────────────────────────────────────────
+
+
+async def test_capture_rejects_low_resolution_photo(
+    client: AsyncClient,
+    tenant_world: dict[str, Any],
+) -> None:
+    """Below the 1024px floor: 422 with an actionable message."""
+    token = await login_admin(client, "admin_a", "pw-a-password")
+    resp = await client.post(
+        "/admin/session/capture",
+        data={"section_id": str(tenant_world["section_a"])},
+        files={"image": ("lowres.jpg", make_jpeg_bytes(size=640), "image/jpeg")},
+        headers=auth(token),
+    )
+    assert resp.status_code == 422
+    assert "resolution too low" in resp.json()["detail"]
+    assert "1024" in resp.json()["detail"]
+
+
+async def test_capture_accepts_boundary_resolution_photo(
+    client: AsyncClient,
+    tenant_world: dict[str, Any],
+    fake_queue: Any,
+) -> None:
+    """Exactly at the floor (1024px shorter side) passes."""
+    token = await login_admin(client, "admin_a", "pw-a-password")
+    resp = await client.post(
+        "/admin/session/capture",
+        data={"section_id": str(tenant_world["section_a"])},
+        files={"image": ("hd.jpg", make_jpeg_bytes(size=1024), "image/jpeg")},
+        headers=auth(token),
+    )
+    assert resp.status_code == 200, resp.text
+    assert len(fake_queue.messages) == 1
+
+
+async def test_capture_rejects_undecodable_image(
+    client: AsyncClient,
+    tenant_world: dict[str, Any],
+) -> None:
+    """Valid content-type header but garbage bytes: 422, not 500."""
+    token = await login_admin(client, "admin_a", "pw-a-password")
+    resp = await client.post(
+        "/admin/session/capture",
+        data={"section_id": str(tenant_world["section_a"])},
+        files={"image": ("corrupt.jpg", b"\xff\xd8garbage-not-a-jpeg", "image/jpeg")},
+        headers=auth(token),
+    )
+    assert resp.status_code == 422
+    assert "decode" in resp.json()["detail"].lower()
 
 
 # ─── Review queue resolve ────────────────────────────────────────────────────

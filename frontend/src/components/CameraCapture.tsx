@@ -17,6 +17,13 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+export interface PoseStep {
+  id: string;
+  label: string;
+  instruction: string;
+  badge?: string;
+}
+
 interface CameraCaptureProps {
   shots: Blob[];
   onChange: (shots: Blob[]) => void;
@@ -24,9 +31,24 @@ interface CameraCaptureProps {
   maxShots: number;
   /** What is being captured — used in helper copy, e.g. "face shots". */
   subject?: string;
+  /**
+   * Minimum acceptable SHORTER-side resolution in px. Captures below the
+   * floor are blocked with a warning (session photos need ~1024px+ for
+   * back-row faces to be recognisable; enrollment close-ups don't).
+   */
+  minResolution?: number;
+  /** Optional sequence of guided poses for multi-angle registration. */
+  poseSteps?: PoseStep[];
 }
 
 type CameraState = "idle" | "starting" | "live" | "denied" | "unavailable" | "insecure";
+
+/** Request full-HD+ so back-row faces stay recognisable in classroom shots. */
+const CAMERA_CONSTRAINTS: MediaTrackConstraints = {
+  width: { ideal: 1920 },
+  height: { ideal: 1080 },
+  facingMode: "user",
+};
 
 export default function CameraCapture({
   shots,
@@ -34,6 +56,8 @@ export default function CameraCapture({
   minShots,
   maxShots,
   subject = "photos",
+  minResolution = 0,
+  poseSteps,
 }: CameraCaptureProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -83,7 +107,7 @@ export default function CameraCapture({
     setState("starting");
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
+        video: CAMERA_CONSTRAINTS,
         audio: false,
       });
       streamRef.current = stream;
@@ -110,6 +134,17 @@ export default function CameraCapture({
   const captureShot = () => {
     const video = videoRef.current;
     if (!video || !video.videoWidth) return;
+    // Resolution floor: block captures that the backend would reject anyway
+    // (session photos need enough pixels for back-row faces).
+    if (minResolution > 0 && Math.min(video.videoWidth, video.videoHeight) < minResolution) {
+      setErrorHint(
+        `Camera resolution is ${video.videoWidth}x${video.videoHeight}px — at least ` +
+          `${minResolution}px on the shorter side is required. Close other ` +
+          "camera apps and retry, or upload a high-resolution photo instead."
+      );
+      return;
+    }
+    setErrorHint("");
     const canvas = document.createElement("canvas");
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
@@ -124,7 +159,7 @@ export default function CameraCapture({
         if (shots.length + 1 >= maxShots) stopStream();
       },
       "image/jpeg",
-      0.92
+      0.95
     );
   };
 
@@ -143,13 +178,53 @@ export default function CameraCapture({
   const canCaptureMore = shots.length < maxShots;
   const isLive = state === "live";
 
+  const numPoseSteps = poseSteps?.length ?? 0;
+  const activePoseIndex = numPoseSteps > 0 && shots.length < numPoseSteps ? shots.length : -1;
+  const currentPose = activePoseIndex >= 0 && poseSteps ? poseSteps[activePoseIndex] : null;
+  const allPosesCompleted = numPoseSteps > 0 && shots.length >= numPoseSteps;
+
   const helperCopy =
     maxShots === 1
       ? `Click one clear ${subject} — look at the preview, then press Capture.`
+      : poseSteps
+      ? `Follow the guided angles below to capture high-accuracy reference templates.`
       : `Take ${minShots}-${maxShots} ${subject} in good light. Look straight at the camera and keep your face inside the frame.`;
 
   return (
     <div>
+      {poseSteps && (
+        <div className="poseGuideContainer">
+          <div className="poseStepper">
+            {poseSteps.map((step, idx) => {
+              const isDone = idx < shots.length;
+              const isActive = idx === shots.length;
+              return (
+                <span
+                  key={step.id}
+                  className={`poseStepItem ${
+                    isDone ? "poseStepItemDone" : isActive ? "poseStepItemActive" : ""
+                  }`}
+                >
+                  {isDone ? "✓ " : isActive ? "● " : "○ "}
+                  {step.label}
+                </span>
+              );
+            })}
+          </div>
+          {currentPose ? (
+            <p className="poseInstruction">
+              <strong>Pose {activePoseIndex + 1} of {poseSteps.length} ({currentPose.label}):</strong>{" "}
+              {currentPose.instruction}
+            </p>
+          ) : allPosesCompleted ? (
+            <p className="poseInstruction" style={{ color: "var(--success)" }}>
+              ✓ All required pose angles captured! You can add up to {maxShots - shots.length} optional shot
+              {maxShots - shots.length === 1 ? "" : "s"} or continue to finalize registration.
+            </p>
+          ) : null}
+        </div>
+      )}
+
       <div className="cameraBox">
         {/* Always rendered so the ref exists BEFORE the stream attaches. */}
         <video
@@ -160,6 +235,15 @@ export default function CameraCapture({
           playsInline
           muted
         />
+        {/* Face alignment reticle and pose banner when pose guidance is active */}
+        {isLive && poseSteps && !allPosesCompleted && (
+          <div className="cameraFaceReticle" aria-hidden="true" />
+        )}
+        {isLive && currentPose && (
+          <div className="cameraPoseBanner">
+            {currentPose.label}: {currentPose.instruction}
+          </div>
+        )}
         {!isLive && (
           <div className="cameraPlaceholder">
             {state === "idle" && "Camera is off — press “Start camera” to begin."}
@@ -190,7 +274,9 @@ export default function CameraCapture({
               onClick={captureShot}
               disabled={!canCaptureMore}
             >
-              Capture ({shots.length}/{maxShots})
+              {currentPose
+                ? `Capture ${currentPose.label} (${shots.length + 1}/${maxShots})`
+                : `Capture (${shots.length}/${maxShots})`}
             </button>
             <button type="button" className="btn btnSecondary" onClick={stopStream}>
               Stop camera
@@ -217,7 +303,7 @@ export default function CameraCapture({
       )}
       {!errorHint && isLive && (
         <p className="muted" style={{ marginTop: "0.5rem" }}>
-          Live preview active — press Capture when ready.
+          Live preview active — keep your face inside the dashed guide and press Capture when ready.
         </p>
       )}
 
@@ -225,17 +311,24 @@ export default function CameraCapture({
         <div className="shotStrip">
           {shots.map((_, idx) =>
             fileFallbackNames[idx] && !thumbnails[idx]?.startsWith("blob:") ? null : (
-              <div className="shotThumb" key={idx}>
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={thumbnails[idx]} alt={`Captured ${idx + 1}`} />
-                <button
-                  type="button"
-                  className="shotRemove"
-                  aria-label={`Remove capture ${idx + 1}`}
-                  onClick={() => removeShot(idx)}
-                >
-                  ×
-                </button>
+              <div className="shotItem" key={idx}>
+                <div className="shotThumb">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={thumbnails[idx]} alt={`Captured ${idx + 1}`} />
+                  <button
+                    type="button"
+                    className="shotRemove"
+                    aria-label={`Remove capture ${idx + 1}`}
+                    onClick={() => removeShot(idx)}
+                  >
+                    ×
+                  </button>
+                </div>
+                {poseSteps && (
+                  <span className="shotPoseTag">
+                    {poseSteps[idx]?.badge ?? poseSteps[idx]?.label ?? `Shot ${idx + 1}`}
+                  </span>
+                )}
               </div>
             )
           )}

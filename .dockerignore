@@ -1,0 +1,43 @@
+# Keep build context minimal — only what the Dockerfile COPYs is needed
+# (pyproject.toml, poetry.lock, alembic.ini, backend/, ml/, scripts/).
+
+# Secrets — never bake into image layers or build context
+.env
+.env.*
+!.env.example
+
+# VCS / tooling caches
+.git
+.github
+.mypy_cache
+.pytest_cache
+.ruff_cache
+**/__pycache__
+**/*.pyc
+
+# Frontend (has its own Dockerfile + image)
+frontend
+node_modules
+package-lock.json
+
+# Local artefacts
+data
+docs
+tests
+.venv
+venv
+*.md
+!README.md
+docker-compose.yml
+.DS_Store
+
+# Local detection smoke test — script, classroom photos, annotated outputs
+# must NEVER reach the build context (aggressive: covers any casing).
+test_local_detection.py
+**/test_local_detection.py
+classroom*.jpg
+classRoom*.jpg
+**/classroom*.jpg
+**/classRoom*.jpg
+*_output.jpg
+**/*_output.jpg

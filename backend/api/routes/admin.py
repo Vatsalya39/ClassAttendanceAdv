@@ -41,6 +41,8 @@ from backend.api.schemas import (
     CaptureAcceptedResponse,
     CaptureResultStudent,
     CaptureStatusResponse,
+    CreateRegistrationTokenRequest,
+    RegistrationTokenResponse,
     ReviewItem,
     ReviewResolvedResponse,
     ReviewResolveRequest,
@@ -52,14 +54,8 @@ from backend.core.jobstatus import JobStatus, get_job_scope, get_status, set_job
 from backend.core.queue import CaptureJobMessage
 from backend.db import dao
 from backend.db.dao.matching import find_nearest_embeddings_institution_wide
-from backend.db.models import (
-    AdminRole,
-    ClassSession,
-    Enrollment,
-    ReviewQueue,
-    Section,
-    Student,
-)
+from backend.db.models import AdminRole, ClassSession, Enrollment, ReviewQueue, Section, Student
+from ml.utils import load_image_from_bytes, validate_image_resolution
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -79,11 +75,18 @@ async def capture(
     storage: StorageDep,
     section_id: uuid.UUID = Form(...),
     course_name: str = Form("General"),
-    image: UploadFile = File(...),
+    image: UploadFile | None = File(None),
+    frames: list[UploadFile] | None = File(None),
 ) -> CaptureAcceptedResponse:
     """
-    Validate + store one classroom photo, enqueue the processing job, and
-    return immediately. The ML pipeline NEVER runs inside this request.
+    Validate + store one classroom photo (or a 1-5 frame burst, Module 4),
+    enqueue the processing job, and return immediately. The ML pipeline
+    NEVER runs inside this request.
+
+    ``image`` is the primary frame (legacy single-photo clients keep
+    working). ``frames`` optionally supplies 2-5 burst photos of the same
+    session — the worker processes each and unions recognized students via
+    the idempotent attendance constraint.
     """
     await require_section_access(session, admin, section_id)
 
@@ -101,25 +104,70 @@ async def capture(
         limit=settings.rate_limit_capture_rpm * 4,
     )
 
-    if (image.content_type or "").lower() not in _ALLOWED_CONTENT_TYPES:
-        raise HTTPException(
-            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail="Only JPEG/PNG classroom photos are accepted",
-        )
-    data = await image.read()
-    if len(data) > settings.upload_max_bytes:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"Image exceeds {settings.upload_max_bytes // (1024 * 1024)} MB limit",
-        )
-    if not data:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Empty file")
+    uploads: list[UploadFile] = []
+    if image is not None:
+        uploads.append(image)
+    if frames:
+        uploads.extend(f for f in frames if f is not None)
 
-    image_url = await storage.upload(
-        data=data,
-        filename=f"capture_{uuid.uuid4().hex[:12]}.jpg",
-        container=settings.azure_blob_container_sessions,
-    )
+    if not uploads:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="At least one classroom photo is required",
+        )
+    if len(uploads) > settings.capture_max_frames:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Too many frames — capture accepts up to {settings.capture_max_frames} "
+                "burst photos per session"
+            ),
+        )
+
+    frame_urls: list[str] = []
+    for upload in uploads:
+        if (upload.content_type or "").lower() not in _ALLOWED_CONTENT_TYPES:
+            raise HTTPException(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                detail="Only JPEG/PNG classroom photos are accepted",
+            )
+        data = await upload.read()
+        if len(data) > settings.upload_max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"Image exceeds {settings.upload_max_bytes // (1024 * 1024)} MB limit",
+            )
+        if not data:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Empty file"
+            )
+        # Resolution floor: back-row faces below ~1024px on the shorter side
+        # embed unreliably and flood the review queue. Reject early with an
+        # actionable message (the frontend camera requests 1080p+).
+        try:
+            decoded = load_image_from_bytes(data)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Could not decode image — unsupported format or corrupted data",
+            ) from None
+        ok, (w, h) = validate_image_resolution(decoded, settings.capture_min_image_side)
+        if not ok:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"Photo resolution too low ({w}x{h}px) — at least "
+                    f"{settings.capture_min_image_side}px on the shorter side is required "
+                    "so back-row students are recognisable. Capture at 1080p or higher."
+                ),
+            )
+        frame_urls.append(
+            await storage.upload(
+                data=data,
+                filename=f"capture_{uuid.uuid4().hex[:12]}_{len(frame_urls)}.jpg",
+                container=settings.azure_blob_container_sessions,
+            )
+        )
 
     class_session = await dao.create_class_session(
         session,
@@ -133,7 +181,8 @@ async def capture(
         job_id=job_id,
         session_id=class_session.session_id,
         section_id=section_id,
-        image_url=image_url,
+        image_url=frame_urls[0],
+        frame_urls=frame_urls,
         admin_id=admin.admin_id,
     )
     await dao.audit_action(
@@ -142,7 +191,7 @@ async def capture(
         action="capture.enqueued",
         target_type="class_session",
         target_id=class_session.session_id,
-        detail=f"job={job_id} section={section_id}",
+        detail=f"job={job_id} section={section_id} frames={len(frame_urls)}",
     )
     await set_status(
         redis, str(job_id), JobStatus.queued, ttl_seconds=settings.job_status_ttl_seconds
@@ -548,4 +597,51 @@ async def purge_biometrics(
         reviews_deleted=reviews_deleted,
         attendance_affected=attendance_affected,
         account_deleted=account_deleted,
+    )
+
+
+@router.post("/registration-tokens", response_model=RegistrationTokenResponse)
+async def issue_registration_token(
+    body: CreateRegistrationTokenRequest,
+    session: DbSession,
+    admin: AdminUser,
+) -> RegistrationTokenResponse:
+    """
+    Issue a single-use registration token for a student roll number.
+    Ensures enrollment requests can be tied back to an authorized identity.
+    """
+    await require_role(admin, AdminRole.super_admin, AdminRole.institution_admin)
+    if admin.institution_id is None and admin.role != AdminRole.super_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Institution required")
+
+    inst_id = admin.institution_id
+    if inst_id is None:
+        from backend.db.models import Institution
+
+        inst = (await session.execute(select(Institution))).scalars().first()
+        if inst is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="No institution found"
+            )
+        inst_id = inst.institution_id
+
+    token_row = await dao.create_registration_token(
+        session,
+        roll_number=body.roll_number,
+        institution_id=inst_id,
+        expires_in_days=body.expires_in_days,
+    )
+    await dao.audit_action(
+        session,
+        admin_id=admin.admin_id,
+        action="registration_token.issued",
+        target_type="student",
+        target_id=None,
+        detail=f"roll_number={body.roll_number} expires_at={token_row.expires_at}",
+    )
+    await session.commit()
+    return RegistrationTokenResponse(
+        token=token_row.token,
+        roll_number=token_row.roll_number,
+        expires_at=token_row.expires_at,
     )

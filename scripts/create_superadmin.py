@@ -29,7 +29,9 @@ async def create(username: str, password: str) -> None:
     async with factory() as session:
         existing = await dao.get_admin_by_username(session, username)
         if existing is not None:
-            print(f"Admin '{username}' already exists (role={existing.role.value}) — nothing to do.")
+            print(
+                f"Admin '{username}' already exists (role={existing.role.value}) — nothing to do."
+            )
             return
         await dao.create_admin(
             session,

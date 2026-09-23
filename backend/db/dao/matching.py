@@ -75,6 +75,40 @@ async def find_nearest_embeddings_for_roster(
     ]
 
 
+async def find_nearest_embeddings_for_student(
+    session: AsyncSession,
+    query_vector: list[float],
+    student_id: uuid.UUID,
+    top_k: int = 5,
+) -> list[RosterMatch]:
+    """
+    Top-k nearest embeddings belonging to ONE student only.
+
+    Enrollment-hygiene check (Module 4): a new enrollment photo must be
+    closer to its own student's existing references than to anyone else's —
+    this returns the "own" side of that comparison. Scope is a single
+    student, so it is trivially roster-safe.
+    """
+    distance_expr = FaceEmbedding.embedding.cosine_distance(query_vector)
+    stmt = (
+        select(
+            FaceEmbedding.student_id,
+            FaceEmbedding.embedding_id,
+            distance_expr.label("distance"),
+        )
+        .where(FaceEmbedding.student_id == student_id)
+        .order_by(distance_expr.asc())
+        .limit(top_k)
+    )
+    rows = (await session.execute(stmt)).all()
+    return [
+        RosterMatch(
+            student_id=r.student_id, embedding_id=r.embedding_id, distance=float(r.distance)
+        )
+        for r in rows
+    ]
+
+
 async def find_nearest_embeddings_institution_wide(
     session: AsyncSession,
     query_vector: list[float],

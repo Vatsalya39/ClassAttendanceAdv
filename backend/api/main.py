@@ -107,14 +107,7 @@ if settings.storage_backend.value == "local":
     )
 
 # ── Route registration ────────────────────────────────────────────────────────
-from backend.api.routes import (  # noqa: E402
-    admin,
-    attendance,
-    auth,
-    org,
-    public,
-    register,
-)
+from backend.api.routes import admin, attendance, auth, org, public, register  # noqa: E402
 
 app.include_router(auth.router)
 app.include_router(register.router)

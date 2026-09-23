@@ -76,11 +76,22 @@ ACR=$(az deployment group show -g $RG -n main \
 MIGRATION_JOB=$(az deployment group show -g $RG -n main \
   --query properties.outputs.migrationJobName.value -o tsv)
 
-# 4. Build & push the backend image (api + worker share one image;
-#    ml-inference uses the same image on the GPU workload profile)
+# 4. Build & push the backend images
+#    NOTE 1: the Dockerfile lives at backend/Dockerfile (repo-root context).
+#    NOTE 2: ALWAYS pass --platform linux/amd64 when building on Apple
+#    Silicon (arm64 Macs) or any ARM machine — Azure Container Apps runs
+#    amd64 nodes, and an arm64 image fails to start with "exec format
+#    error". GitHub Actions CI (ubuntu-latest = x86_64) does not need the
+#    flag. Docker Desktop emulates amd64 via QEMU, so this works locally.
+#    NOTE 3: build the ml-cpu / api-ml targets, NOT the plain `worker`
+#    target — the plain worker has no InsightFace and detects 0 faces.
 az acr login -n $ACR
-docker build --target worker -t $ACR/backend:latest .
-docker push $ACR/backend:latest
+docker build -f backend/Dockerfile --platform linux/amd64 \
+  --target api-ml -t $ACR/attendance-api:latest .
+docker build -f backend/Dockerfile --platform linux/amd64 \
+  --target ml-cpu -t $ACR/attendance-worker-ml:latest .
+docker push $ACR/attendance-api:latest
+docker push $ACR/attendance-worker-ml:latest
 
 # 5. Run migrations INSIDE the VNet (GitHub runners cannot reach private Postgres)
 az containerapp job start -g $RG -n $MIGRATION_JOB

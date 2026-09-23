@@ -34,6 +34,12 @@ export default function SuperAdminConsolePage() {
   const [adminInstId, setAdminInstId] = useState("");
   const [adminDeptId, setAdminDeptId] = useState("");
 
+  const [tokenRollNumber, setTokenRollNumber] = useState("");
+  const [tokenDays, setTokenDays] = useState(30);
+  const [issuedToken, setIssuedToken] = useState<{ token: string; roll: string; expires: string } | null>(null);
+  const [issuingToken, setIssuingToken] = useState(false);
+  const [tokenCopied, setTokenCopied] = useState(false);
+
   const refreshAll = useCallback(async () => {
     try {
       const [insts, depts, secs] = await Promise.all([
@@ -306,6 +312,104 @@ export default function SuperAdminConsolePage() {
           >
             Create admin
           </button>
+        </div>
+
+        <div className="card">
+          <h2 className="cardTitle">Student Registration Tokens</h2>
+          <p className="muted" style={{ marginBottom: "1rem" }}>
+            Issue single-use verification tokens for students before they register with their face.
+          </p>
+          <div className="field">
+            <label className="label">Student Roll Number</label>
+            <input
+              className="input mono"
+              value={tokenRollNumber}
+              onChange={(e) => setTokenRollNumber(e.target.value)}
+              placeholder="e.g. 25BLC1105"
+            />
+          </div>
+          <div className="field">
+            <label className="label">Validity (days)</label>
+            <input
+              type="number"
+              min={1}
+              max={365}
+              className="input"
+              value={tokenDays}
+              onChange={(e) => setTokenDays(Number(e.target.value))}
+              style={{ width: 120 }}
+            />
+          </div>
+          <button
+            className="btn btnPrimary"
+            disabled={!tokenRollNumber.trim() || issuingToken}
+            onClick={async () => {
+              setError("");
+              setNotice("");
+              setIssuingToken(true);
+              setTokenCopied(false);
+              try {
+                const res = await api.admin.issueRegistrationToken(tokenRollNumber.trim(), tokenDays);
+                setIssuedToken({ token: res.token, roll: res.roll_number, expires: res.expires_at });
+                setNotice(`Registration token generated for ${res.roll_number}`);
+                setTokenRollNumber("");
+              } catch (e) {
+                setError(e instanceof ApiError ? e.message : "Failed to issue token");
+              } finally {
+                setIssuingToken(false);
+              }
+            }}
+          >
+            {issuingToken ? "Generating…" : "Generate token"}
+          </button>
+
+          {issuedToken && (
+            <div
+              style={{
+                marginTop: "1.25rem",
+                padding: "1rem",
+                background: "var(--bg)",
+                borderRadius: "8px",
+                border: "1px solid var(--border)",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  marginBottom: "0.5rem",
+                }}
+              >
+                <span style={{ fontSize: "0.85rem", fontWeight: 600 }}>
+                  Active Token for <span className="mono">{issuedToken.roll}</span>
+                </span>
+                <span className="badge badgeSuccess">Single-Use</span>
+              </div>
+              <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                <input
+                  readOnly
+                  className="input mono"
+                  value={issuedToken.token}
+                  style={{ background: "var(--surface)", fontWeight: 600 }}
+                />
+                <button
+                  type="button"
+                  className="btn btnSecondary"
+                  onClick={() => {
+                    navigator.clipboard.writeText(issuedToken.token);
+                    setTokenCopied(true);
+                    setTimeout(() => setTokenCopied(false), 2500);
+                  }}
+                >
+                  {tokenCopied ? "✓ Copied" : "Copy"}
+                </button>
+              </div>
+              <p className="muted" style={{ fontSize: "0.78rem", marginTop: "0.4rem" }}>
+                Give this token to the student to enter on the registration page.
+              </p>
+            </div>
+          )}
         </div>
       </div>
     </main>

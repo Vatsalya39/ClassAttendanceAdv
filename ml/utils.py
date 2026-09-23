@@ -23,10 +23,42 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# Maximum image side length before downscaling for detection.
-# RetinaFace internally uses det_size=(640, 640), so sending a 4K image gives
-# no accuracy benefit and wastes memory / CPU decode time.
+# Maximum image side length before downscaling for SINGLE-STUDENT ENROLLMENT
+# SELFIES only. RetinaFace internally re-downscales to its det_size anyway,
+# so a 4K selfie gains nothing and wastes decode time.
+#
+# IMPORTANT (Module 2): classroom session/group photos are NOT downscaled —
+# they keep their native resolution so tiled detection can resolve small
+# back-row faces. See ml.pipeline.batch_process(tiled_config=...).
 DEFAULT_MAX_SIDE: int = 1280
+
+
+def validate_image_resolution(
+    image: np.ndarray,
+    min_side: int,
+) -> tuple[bool, tuple[int, int]]:
+    """
+    Check that ``image`` meets a minimum side-length floor (session photos).
+
+    Back-row faces in a full classroom shot need roughly 1024px on the
+    shorter side to embed reliably — the capture endpoint uses this to
+    reject low-resolution uploads early (422) instead of letting the
+    worker flood the review queue with unrecognizable faces.
+
+    Parameters
+    ----------
+    image    : Decoded BGR uint8 numpy array (H, W, 3).
+    min_side : Minimum acceptable length of the SHORTER side in pixels.
+               Values <= 0 disable the check (always pass).
+
+    Returns
+    -------
+    (ok, (width, height)) — ok=True when the floor is met or disabled.
+    """
+    h, w = image.shape[:2]
+    if min_side <= 0:
+        return True, (w, h)
+    return min(h, w) >= min_side, (w, h)
 
 
 def load_image_from_bytes(data: bytes) -> np.ndarray:
@@ -99,9 +131,17 @@ def resize_for_detection(
     """
     Downscale ``image`` so its longest side is at most ``max_side`` pixels.
 
+    ENROLLMENT PHOTOS ONLY (Module 2): a close-up selfie needs no more than
+    ~1280 px for reliable detection, and RetinaFace re-downscales internally
+    to its det_size anyway.
+
+    Session/classroom photos must NOT be passed through this function —
+    the worker hands them to batch_process() at NATIVE resolution (with
+    optional tiled detection for wide shots).
+
     Small images are returned unchanged (no upscaling). This caps latency
-    and memory for high-resolution classroom cameras without degrading
-    RetinaFace accuracy (which re-downscales internally to det_size=640×640).
+    and memory for high-resolution enrollment cameras without degrading
+    RetinaFace accuracy.
 
     Parameters
     ----------

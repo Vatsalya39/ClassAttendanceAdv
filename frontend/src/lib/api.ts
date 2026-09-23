@@ -145,7 +145,7 @@ const students = {
   },
 
   register: async (
-    fields: { rollNumber: string; name: string; password: string; sectionId: string },
+    fields: { rollNumber: string; name: string; password: string; sectionId: string; registrationToken?: string },
     images: Blob[]
   ): Promise<RegisterResponse> => {
     const fd = new FormData();
@@ -153,6 +153,9 @@ const students = {
     fd.append("name", fields.name);
     fd.append("password", fields.password);
     fd.append("section_id", fields.sectionId);
+    if (fields.registrationToken) {
+      fd.append("registration_token", fields.registrationToken.trim());
+    }
     images.forEach((img, i) => fd.append("images", img, `enrollment_${i + 1}.jpg`));
     return apiFetch<RegisterResponse>("/register", { method: "POST", formData: fd, skipAuth: true });
   },
@@ -234,6 +237,15 @@ const admin = {
 
   listStudentsInSection: (sectionId: string) =>
     apiFetch<RosterStudent[]>(`/admin/sections/${sectionId}/students`),
+
+  issueRegistrationToken: (rollNumber: string, expiresInDays = 30) =>
+    apiFetch<{ token: string; roll_number: string; expires_at: string }>(
+      "/admin/registration-tokens",
+      {
+        method: "POST",
+        body: { roll_number: rollNumber, expires_in_days: expiresInDays },
+      }
+    ),
 };
 
 // ─── Org CRUD (super-admin / scoped admins) ──────────────────────────────────

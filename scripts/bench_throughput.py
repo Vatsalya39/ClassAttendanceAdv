@@ -87,6 +87,12 @@ def main() -> None:
         default=10,
         help="Timed iterations per batch size",
     )
+    parser.add_argument(
+        "--model-pack",
+        type=str,
+        default="buffalo_l",
+        help="InsightFace model pack (e.g. buffalo_l or antelopev2)",
+    )
     args = parser.parse_args()
 
     if not args.image_dir.exists():
@@ -104,7 +110,7 @@ def main() -> None:
     from ml.pipeline import _get_app, batch_process  # noqa: E402
 
     # Pre-load model
-    _get_app()
+    _get_app(model_pack=args.model_pack)
 
     all_images = [
         cv2.imread(str(p))
@@ -115,7 +121,7 @@ def main() -> None:
         print("ERROR: no readable images found in --image-dir", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Loaded {len(all_images)} benchmark images.")
+    print(f"Loaded {len(all_images)} benchmark images. Model pack: {args.model_pack}")
     print(f"Warm-up: {args.warmup_iters} iterations")
     print(f"Timed:   {args.bench_iters} iterations\n")
 
@@ -126,14 +132,14 @@ def main() -> None:
         # Warm-up
         for _ in range(args.warmup_iters):
             for img in images:
-                batch_process(img)
+                batch_process(img, model_pack=args.model_pack)
 
         # Timed
         total_faces = 0
         start = time.perf_counter()
         for _ in range(args.bench_iters):
             for img in images:
-                faces = batch_process(img)
+                faces = batch_process(img, model_pack=args.model_pack)
                 total_faces += len(faces)
         elapsed = time.perf_counter() - start
 

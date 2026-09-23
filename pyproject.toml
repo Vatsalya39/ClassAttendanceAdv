@@ -49,6 +49,10 @@ structlog = "^24.2.0"
 httpx = "^0.27.0"
 aiohttp = "^3.14.3"
 
+# ── Matching ──────────────────────────────────────────────────────────────────
+# Hungarian 1-to-1 face→student assignment in backend/services/capture.py.
+scipy = "^1.13.0"
+
 [tool.poetry.group.dev.dependencies]
 # Testing
 pytest = "^8.2.0"

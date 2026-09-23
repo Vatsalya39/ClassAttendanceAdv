@@ -102,7 +102,8 @@ RUN python3 -m pip install --upgrade pip \
         "pydantic-settings>=2.3,<3" \
         "passlib[argon2]>=1.7.4,<2" \
         "python-jose[cryptography]>=3.3.0,<4" \
-        "structlog>=24.2.0,<25"
+        "structlog>=24.2.0,<25" \
+        "aiohttp>=3.9,<4"
 
 COPY backend/ backend/
 COPY ml/ ml/

@@ -47,6 +47,17 @@ class RegisterResponse(BaseModel):
     embeddings_stored: int
 
 
+class CreateRegistrationTokenRequest(BaseModel):
+    roll_number: str = Field(min_length=1, max_length=64)
+    expires_in_days: int = Field(default=30, ge=1, le=365)
+
+
+class RegistrationTokenResponse(BaseModel):
+    token: str
+    roll_number: str
+    expires_at: datetime
+
+
 # ─── Student attendance ──────────────────────────────────────────────────────
 
 

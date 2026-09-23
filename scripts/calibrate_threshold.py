@@ -47,8 +47,22 @@ def main() -> None:
         nargs="+",
         default=[0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60],
     )
+    parser.add_argument(
+        "--clahe-mode",
+        type=str,
+        choices=["none", "global", "adaptive"],
+        default="adaptive",
+        help="CLAHE mode: none, global, or adaptive",
+    )
+    parser.add_argument("--no-clahe", action="store_true", help="Shortcut for --clahe-mode none")
+    parser.add_argument(
+        "--model-pack", type=str, default="buffalo_l", help="InsightFace model pack"
+    )
     parser.add_argument("--output", type=Path, default=Path("threshold_calibration.png"))
     args = parser.parse_args()
+
+    if args.no_clahe:
+        args.clahe_mode = "none"
 
     if not args.pairs_dir.exists():
         print(f"ERROR: pairs directory not found: {args.pairs_dir}", file=sys.stderr)
@@ -56,11 +70,15 @@ def main() -> None:
 
     try:
         import cv2
-        import matplotlib.pyplot as plt
         import numpy as np
     except ImportError:
         print("ERROR: run `pip install -r ml/requirements.txt`", file=sys.stderr)
         sys.exit(1)
+
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        plt = None
 
     sys.path.insert(0, str(Path(__file__).parent.parent))
     from ml.pipeline import batch_process
@@ -69,16 +87,28 @@ def main() -> None:
     student_embeddings: dict[str, list[np.ndarray]] = {}
     student_dirs = sorted(d for d in args.pairs_dir.iterdir() if d.is_dir())
 
-    print(f"Found {len(student_dirs)} student directories.")
+    print(
+        f"Found {len(student_dirs)} student directories. "
+        f"CLAHE_MODE={args.clahe_mode.upper()}, Model={args.model_pack}"
+    )
     for student_dir in student_dirs:
         embeds: list[np.ndarray] = []
         for img_path in sorted(student_dir.glob("*.jpg")) + sorted(student_dir.glob("*.png")):
             image = cv2.imread(str(img_path))
             if image is None:
                 continue
-            faces = batch_process(image)
+            faces = batch_process(
+                image,
+                apply_clahe=(args.clahe_mode != "none"),
+                clahe_mode=args.clahe_mode,
+                model_pack=args.model_pack,
+            )
             if faces:
-                embeds.append(np.array(faces[0].embedding, dtype=np.float32))
+                # Module 4: pick the LARGEST face (main subject), not blindly
+                # faces[0] — detection order is arbitrary and a background
+                # bystander's embedding would poison the pair distributions.
+                main_face = max(faces, key=lambda f: f.bbox.area)
+                embeds.append(np.array(main_face.embedding, dtype=np.float32))
         if embeds:
             student_embeddings[student_dir.name] = embeds
             print(f"  {student_dir.name}: {len(embeds)} embeddings")
@@ -100,8 +130,20 @@ def main() -> None:
                     dist = float(1.0 - float(np.dot(e1, e2)))
                     diff_distances.append(dist)
 
-    print(f"\nSame-person pairs: {len(same_distances)}")
-    print(f"Different-person pairs: {len(diff_distances)}")
+    same_arr = np.array(same_distances, dtype=np.float64)
+    diff_arr = np.array(diff_distances, dtype=np.float64)
+
+    mean_same, std_same = float(np.mean(same_arr)), float(np.std(same_arr))
+    mean_diff, std_diff = float(np.mean(diff_arr)), float(np.std(diff_arr))
+    margin = mean_diff - mean_same
+
+    print(
+        f"\nSame-person (genuine) pairs: {len(same_distances)} | mean={mean_same:.4f}, std={std_same:.4f}"
+    )
+    print(
+        f"Different-person (impostor) pairs: {len(diff_distances)} | mean={mean_diff:.4f}, std={std_diff:.4f}"
+    )
+    print(f"Decision Margin (mean_diff - mean_same): {margin:+.4f}")
 
     # ── Compute FAR / FRR at each threshold ───────────────────────────────────
     print(f"\n{'Threshold':>10} {'FAR':>8} {'FRR':>8} {'Precision':>10} {'Recall':>8}")
@@ -121,26 +163,31 @@ def main() -> None:
         print(f"{t:>10.2f} {far:>8.4f} {frr:>8.4f} {precision:>10.4f} {recall:>8.4f}")
 
     # ── Plot ──────────────────────────────────────────────────────────────────
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    if plt is not None:
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    axes[0].hist(same_distances, bins=50, alpha=0.6, label="Same person", color="green")
-    axes[0].hist(diff_distances, bins=50, alpha=0.6, label="Different person", color="red")
-    axes[0].set_xlabel("Cosine distance")
-    axes[0].set_ylabel("Count")
-    axes[0].set_title("Distance distribution")
-    axes[0].legend()
+        axes[0].hist(same_distances, bins=50, alpha=0.6, label="Same person", color="green")
+        axes[0].hist(diff_distances, bins=50, alpha=0.6, label="Different person", color="red")
+        axes[0].set_xlabel("Cosine distance")
+        axes[0].set_ylabel("Count")
+        axes[0].set_title("Distance distribution")
+        axes[0].legend()
 
-    axes[1].plot(thresholds, far_list, label="FAR (false accept)", marker="o")
-    axes[1].plot(thresholds, frr_list, label="FRR (false reject / review queue rate)", marker="s")
-    axes[1].set_xlabel("Threshold")
-    axes[1].set_ylabel("Rate")
-    axes[1].set_title("FAR / FRR vs Threshold")
-    axes[1].legend()
-    axes[1].grid(True)
+        axes[1].plot(thresholds, far_list, label="FAR (false accept)", marker="o")
+        axes[1].plot(
+            thresholds, frr_list, label="FRR (false reject / review queue rate)", marker="s"
+        )
+        axes[1].set_xlabel("Threshold")
+        axes[1].set_ylabel("Rate")
+        axes[1].set_title("FAR / FRR vs Threshold")
+        axes[1].legend()
+        axes[1].grid(True)
 
-    plt.tight_layout()
-    plt.savefig(str(args.output), dpi=150)
-    print(f"\nPlot saved to {args.output}")
+        plt.tight_layout()
+        plt.savefig(str(args.output), dpi=150)
+        print(f"\nPlot saved to {args.output}")
+    else:
+        print("\nNote: matplotlib not installed; histogram plot skipped.")
 
     # ── Suggest threshold (FAR < 1%) ─────────────────────────────────────────
     candidates = [

@@ -23,6 +23,7 @@ from ml.utils import (
     load_image_from_bytes,
     load_image_from_path,
     resize_for_detection,
+    validate_image_resolution,
 )
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -149,3 +150,29 @@ class TestResizeForDetection:
         image = make_bgr_image(1500, 2000)
         result = resize_for_detection(image, max_side=1280)
         assert result.dtype == np.uint8
+
+
+# ─── validate_image_resolution ───────────────────────────────────────────────
+
+
+class TestValidateImageResolution:
+    def test_meets_floor(self) -> None:
+        image = make_bgr_image(1080, 1920)  # shorter side 1080
+        ok, (w, h) = validate_image_resolution(image, min_side=1024)
+        assert ok
+        assert (w, h) == (1920, 1080)
+
+    def test_boundary_exactly_at_floor(self) -> None:
+        image = make_bgr_image(1024, 4096)
+        ok, _ = validate_image_resolution(image, min_side=1024)
+        assert ok
+
+    def test_below_floor_rejected(self) -> None:
+        image = make_bgr_image(559, 1024)  # shorter side 559
+        ok, _ = validate_image_resolution(image, min_side=1024)
+        assert not ok
+
+    def test_zero_disables_check(self) -> None:
+        image = make_bgr_image(64, 64)
+        ok, _ = validate_image_resolution(image, min_side=0)
+        assert ok

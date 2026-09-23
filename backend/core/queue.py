@@ -46,13 +46,22 @@ if TYPE_CHECKING:
 
 
 class CaptureJobMessage(BaseModel):
-    """Payload enqueued when an admin triggers attendance capture."""
+    """Payload enqueued when an admin triggers attendance capture.
+
+    ``frame_urls`` (Module 4) carries 1-5 burst frames of the SAME session;
+    the first entry is the primary photo. Legacy messages with only
+    ``image_url`` still deserialize (it stays the canonical primary).
+    """
 
     job_id: uuid.UUID = Field(default_factory=uuid.uuid4)
     session_id: uuid.UUID
     section_id: uuid.UUID
-    image_url: str  # Blob URL or local path, resolved by the worker
+    image_url: str  # Blob URL or local path, resolved by the worker (primary frame)
     admin_id: uuid.UUID
+    # Burst ingestion: additional frames processed after the primary; the
+    # idempotent (student_id, session_id, session_date) constraint unions
+    # recognized students across frames for free.
+    frame_urls: list[str] = Field(default_factory=list)
     enqueued_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     def to_json(self) -> str:

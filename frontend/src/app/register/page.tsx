@@ -10,7 +10,28 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import api, { ApiError } from "@/lib/api";
 import type { PublicSection } from "@/lib/types";
-import CameraCapture from "@/components/CameraCapture";
+import CameraCapture, { type PoseStep } from "@/components/CameraCapture";
+
+const ENROLLMENT_POSES: PoseStep[] = [
+  {
+    id: "frontal",
+    label: "Frontal",
+    instruction: "Look straight at the camera with a neutral expression and eyes open.",
+    badge: "Frontal (0°)",
+  },
+  {
+    id: "left",
+    label: "Slight Left",
+    instruction: "Turn head gently ~15° to your left, keeping eyes towards the camera.",
+    badge: "Left (~15°)",
+  },
+  {
+    id: "right",
+    label: "Slight Right",
+    instruction: "Turn head gently ~15° to your right, keeping eyes towards the camera.",
+    badge: "Right (~15°)",
+  },
+];
 
 export default function RegisterPage() {
   const [step, setStep] = useState<1 | 2>(1);
@@ -19,6 +40,7 @@ export default function RegisterPage() {
 
   const [rollNumber, setRollNumber] = useState("");
   const [name, setName] = useState("");
+  const [registrationToken, setRegistrationToken] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [sectionId, setSectionId] = useState("");
@@ -38,6 +60,7 @@ export default function RegisterPage() {
   const detailsValid =
     rollNumber.trim().length > 0 &&
     name.trim().length > 0 &&
+    registrationToken.trim().length > 0 &&
     password.length >= 8 &&
     password === confirmPassword &&
     sectionId !== "";
@@ -47,7 +70,13 @@ export default function RegisterPage() {
     setSubmitting(true);
     try {
       const res = await api.students.register(
-        { rollNumber: rollNumber.trim(), name: name.trim(), password, sectionId },
+        {
+          rollNumber: rollNumber.trim(),
+          name: name.trim(),
+          password,
+          sectionId,
+          registrationToken: registrationToken.trim(),
+        },
         shots
       );
       setResult({ name: res.name, stored: res.embeddings_stored });
@@ -57,6 +86,8 @@ export default function RegisterPage() {
         e instanceof ApiError
           ? e.status === 409
             ? "This roll number is already registered — try logging in instead."
+            : e.status === 403
+            ? "Registration token is invalid, expired, or already used. Please contact your instructor."
             : e.message
           : "Registration failed. Please try again."
       );
@@ -97,7 +128,7 @@ export default function RegisterPage() {
     <main className="page pageNarrow">
       <h1 className="pageTitle">Register with your face</h1>
       <p className="pageSubtitle">
-        Step {step} of 2 — {step === 1 ? "your details" : "camera captures"}
+        Step {step} of 2 — {step === 1 ? "your details" : "guided camera captures"}
       </p>
 
       {loadError && <div className="alert alertError">{loadError}</div>}
@@ -150,6 +181,22 @@ export default function RegisterPage() {
             </select>
           </div>
           <div className="field">
+            <label className="label" htmlFor="regToken">
+              Registration token / invitation code
+            </label>
+            <input
+              id="regToken"
+              className="input mono"
+              value={registrationToken}
+              onChange={(e) => setRegistrationToken(e.target.value)}
+              placeholder="e.g. REG-A1B2-C3D4 or token from instructor"
+              autoComplete="off"
+            />
+            <span className="muted" style={{ fontSize: "0.8rem", marginTop: "0.25rem" }}>
+              Required single-use token provided by your department or faculty.
+            </span>
+          </div>
+          <div className="field">
             <label className="label" htmlFor="password">
               Password (min 8 characters)
             </label>
@@ -193,6 +240,8 @@ export default function RegisterPage() {
             onChange={setShots}
             minShots={3}
             maxShots={5}
+            subject="face angles"
+            poseSteps={ENROLLMENT_POSES}
           />
           {error && <div className="alert alertError">{error}</div>}
           <div className="btnRow" style={{ marginTop: "1rem" }}>
@@ -207,6 +256,19 @@ export default function RegisterPage() {
               {submitting ? "Processing…" : `Register with ${shots.length} photo${shots.length === 1 ? "" : "s"}`}
             </button>
           </div>
+          <p
+            className="muted"
+            style={{
+              marginTop: "1.25rem",
+              borderTop: "1px solid var(--border)",
+              paddingTop: "0.85rem",
+              lineHeight: 1.5,
+            }}
+          >
+            💡 <strong>Why multiple angles?</strong> Capturing your face from frontal and slight angles creates
+            robust reference embeddings, allowing automated attendance to recognize you accurately in class
+            from any seat without runtime template drift.
+          </p>
         </div>
       )}
     </main>

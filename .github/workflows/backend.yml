@@ -127,7 +127,11 @@ jobs:
 
       - name: Build & push api image (api-ml target)
         run: |
-          docker build --target api-ml \
+          # Explicit platform pin: Azure Container Apps runs amd64 nodes.
+          # ubuntu-latest is x86_64 today, but GitHub ARM runners would
+          # otherwise silently produce arm64 images that crash with
+          # "exec format error" on deploy.
+          docker build -f backend/Dockerfile --platform linux/amd64 --target api-ml \
             -t "${{ vars.ACR_LOGIN_SERVER }}/attendance-api:${{ steps.meta.outputs.image_tag }}" \
             -t "${{ vars.ACR_LOGIN_SERVER }}/attendance-api:latest" .
           docker push "${{ vars.ACR_LOGIN_SERVER }}/attendance-api:${{ steps.meta.outputs.image_tag }}"
@@ -135,7 +139,7 @@ jobs:
 
       - name: Build & push CPU worker image (ml-cpu target)
         run: |
-          docker build --target ml-cpu \
+          docker build -f backend/Dockerfile --platform linux/amd64 --target ml-cpu \
             -t "${{ vars.ACR_LOGIN_SERVER }}/attendance-worker-ml:${{ steps.meta.outputs.image_tag }}" \
             -t "${{ vars.ACR_LOGIN_SERVER }}/attendance-worker-ml:latest" .
           docker push "${{ vars.ACR_LOGIN_SERVER }}/attendance-worker-ml:${{ steps.meta.outputs.image_tag }}"

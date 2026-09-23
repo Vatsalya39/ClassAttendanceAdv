@@ -27,7 +27,7 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# ── SQLAlchemy metadata ───────────────────────────────────────────────────────
+from backend.core.config import settings  # noqa: E402
 from backend.db import Base, models  # noqa: E402, F401 (models register tables)
 
 target_metadata = Base.metadata
@@ -35,7 +35,7 @@ target_metadata = Base.metadata
 
 # ── DSN override from environment ─────────────────────────────────────────────
 def get_url() -> str:
-    url = os.environ.get("DATABASE_URL_SYNC")
+    url = os.environ.get("DATABASE_URL_SYNC") or settings.database_url_sync
     if not url:
         raise RuntimeError(
             "DATABASE_URL_SYNC environment variable is not set. "

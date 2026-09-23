@@ -13,12 +13,7 @@ import uuid
 from fastapi import APIRouter, HTTPException, Request, status
 
 from backend.api.deps import DbSession, RedisDep, enforce_rate_limit
-from backend.api.schemas import (
-    AdminLoginRequest,
-    RefreshRequest,
-    StudentLoginRequest,
-    TokenPair,
-)
+from backend.api.schemas import AdminLoginRequest, RefreshRequest, StudentLoginRequest, TokenPair
 from backend.core.config import settings
 from backend.core.security import (
     InvalidTokenError,

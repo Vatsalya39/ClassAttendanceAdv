@@ -132,7 +132,12 @@ async def test_concurrent_captures_never_cross_rosters(
 async def test_unknown_face_goes_to_review_not_forced_match(
     db_session: AsyncSession, two_sections: dict[str, uuid.UUID]
 ) -> None:
-    """An intruder's face (not on any roster) must land in review, unassigned."""
+    """An intruder's face (not close to any roster member) must land in review.
+
+    Module 3: the face is never force-matched — but the nearest roster
+    student is attached as a best guess (with its distance) so the admin's
+    review UI can suggest a candidate. No attendance may be written.
+    """
     intruder_face = [((1, 1, 50, 50), unit_vec(9999))]
 
     session_row = await dao.create_class_session(
@@ -150,7 +155,8 @@ async def test_unknown_face_goes_to_review_not_forced_match(
     )
     assert len(outcomes) == 1
     assert not outcomes[0].matched
-    assert outcomes[0].student_id is None
+    # Above-threshold faces keep their best guess + distance for the review UI.
+    assert outcomes[0].review_reason == "above-threshold"
 
     outcome = await write_capture_results(
         db_session,
@@ -160,17 +166,27 @@ async def test_unknown_face_goes_to_review_not_forced_match(
     )
     await db_session.commit()
 
+    # Module 3 invariant: every face lands in exactly one bucket.
     assert outcome.faces_total == 1
     assert not outcome.matched
     assert len(outcome.review_needed) == 1
+    assert outcome.faces_total == len(outcome.matched) + len(outcome.review_needed)
 
-    from sqlalchemy import select
+    from sqlalchemy import func, select
 
-    from backend.db.models import ReviewQueue
+    from backend.db.models import Attendance, ReviewQueue
 
     rows = list((await db_session.execute(select(ReviewQueue))).scalars())
     assert len(rows) == 1
-    assert rows[0].best_guess_student_id is None
+    assert rows[0].status.value == "pending"
+    # Best guess is attached (nearest roster student) with its distance…
+    assert rows[0].best_guess_student_id is not None
+    assert rows[0].best_guess_distance is not None
+    # …but NO attendance row may exist for the guessed student.
+    attendance_count = (
+        await db_session.execute(select(func.count()).select_from(Attendance))
+    ).scalar_one()
+    assert attendance_count == 0
 
 
 async def test_reprocessing_same_job_does_not_double_write(
@@ -204,7 +220,12 @@ async def test_reprocessing_same_job_does_not_double_write(
     await db_session.commit()
 
     assert len(first.matched) == 2  # inserted now
-    assert len(second.matched) == 0  # conflict-skipped duplicates
+    # Module 3 semantic change: on re-processing, faces that match cleanly
+    # are still accounted as matched (the burst-union semantics) even when
+    # the attendance insert is conflict-skipped — the STUDENT is present,
+    # the write is simply idempotent. Attendance rows must not duplicate.
+    assert len(second.matched) == 2
+    assert len(second.review_needed) == 0
 
     from sqlalchemy import func, select
 
