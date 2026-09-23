@@ -86,7 +86,10 @@ classRoom*.jpg
 
 # ─── Presentations, slide generation & test decks ───────────────────────────
 *.pptx
+*.docx
 generate_deck.py
 update_layout.py
+scripts/generate_work_division_doc.py
 results/
+
 
